@@ -32,10 +32,16 @@ app = Flask(__name__)
 @app.route("/api/state")
 def api_state():
     if not os.path.exists(STATE_FILE):
-        return jsonify({"error": "No state file yet — paper trader hasn't started a tick"}), 404
-    with open(STATE_FILE) as f:
-        data = json.load(f)
-    return jsonify(data)
+        resp = jsonify({"error": "No state file yet — paper trader hasn't started a tick"})
+    else:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+        resp = jsonify(data)
+    # Prevent the browser and any proxy from caching this response
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"]        = "no-cache"
+    resp.headers["Expires"]       = "0"
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +270,7 @@ function timeLabel(iso) {
 async function refresh() {
   let data;
   try {
-    const res = await fetch('/api/state');
+    const res = await fetch('/api/state?t=' + Date.now(), {cache: 'no-store'});
     if (!res.ok) return;
     data = await res.json();
   } catch { return; }

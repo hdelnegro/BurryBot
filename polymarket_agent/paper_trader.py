@@ -106,10 +106,12 @@ class PaperTrader:
         # Register graceful Ctrl+C handler
         signal.signal(signal.SIGINT, _handle_sigint)
 
+        import sys as _sys
         print(f"\nPaper Trading Mode — {self.strategy.name}")
         print(f"Markets: {self.num_markets} | Duration: {self.duration_minutes} min")
         print(f"Poll interval: {PAPER_POLL_INTERVAL_SECONDS}s | Starting cash: ${self.portfolio.cash:.2f}")
         print("-" * 55)
+        _sys.stdout.flush()
 
         # Step 1: Fetch active markets
         print("\nFetching active markets...")
@@ -215,9 +217,14 @@ class PaperTrader:
         """
         One polling cycle: fetch latest prices → run strategy → execute trades.
         """
+        import sys
+
         self.tick_count += 1
         now = datetime.utcnow()
-        print(f"\n[Tick {self.tick_count}] {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        print(f"\n{'='*55}")
+        print(f"[Tick {self.tick_count}] {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        print(f"{'='*55}")
+        sys.stdout.flush()
 
         # Fetch fresh current prices for each market
         current_prices: Dict[str, float] = {}
@@ -226,23 +233,36 @@ class PaperTrader:
             token_id   = market.yes_token_id
             latest_bar = self._fetch_latest_price(token_id)
 
+            existing = self.price_history.get(token_id, [])
+
             if latest_bar is None:
-                # No new data yet — use last known price
-                existing = self.price_history.get(token_id, [])
+                # No new bar yet — price unchanged since last poll
                 if existing:
                     current_prices[token_id] = existing[-1].price
+                    print(f"  {market.slug[:38]:38s} | price={existing[-1].price:.4f} "
+                          f"[no new bar]")
+                else:
+                    print(f"  {market.slug[:38]:38s} | no data")
+                sys.stdout.flush()
                 continue
 
-            # Append new bar to history
+            # Append new bar to in-memory history
             history = self.price_history.setdefault(token_id, [])
+            prev_price = history[-1].price if history else latest_bar.price
             history.append(latest_bar)
             current_prices[token_id] = latest_bar.price
 
-            print(f"  {market.slug[:35]:35s} | price={latest_bar.price:.3f} | "
-                  f"history={len(history)} bars")
+            # Price change indicator
+            delta = latest_bar.price - prev_price
+            arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "—")
+            print(f"  {market.slug[:38]:38s} | price={latest_bar.price:.4f} "
+                  f"{arrow}{abs(delta):.4f} | {len(history)} bars")
+            sys.stdout.flush()
 
-            # Build DataFrame for strategy (no lookahead: exclude the bar we just fetched)
+            # Build DataFrame for strategy (no lookahead: exclude the bar just fetched)
             if len(history) < 2:
+                print(f"    → Skipping: not enough history yet")
+                sys.stdout.flush()
                 continue
 
             df = pd.DataFrame(
@@ -251,7 +271,7 @@ class PaperTrader:
             )
             df.index = pd.DatetimeIndex(df.index)
 
-            # Ask the strategy
+            # Ask the strategy what to do
             signal = self.strategy.generate_signal(
                 token_id      = token_id,
                 price_history = df,
@@ -259,22 +279,32 @@ class PaperTrader:
                 current_time  = latest_bar.timestamp,
             )
 
+            # Always print the signal (including HOLD) so user can see reasoning
+            action_icon = {"BUY": "🟢 BUY", "SELL": "🔴 SELL", "HOLD": "⬜ HOLD"}.get(
+                signal.action, signal.action
+            )
+            print(f"    → Signal: {action_icon} | conf={signal.confidence:.0%} | "
+                  f"{signal.reason}")
+            sys.stdout.flush()
+
             if signal.action == "HOLD":
                 continue
 
             # Check risk manager
-            allowed, trade_size, reason = self.risk_manager.check_signal(
+            allowed, trade_size, risk_reason = self.risk_manager.check_signal(
                 signal         = signal,
                 portfolio      = self.portfolio,
                 current_prices = current_prices,
             )
 
             if not allowed:
-                print(f"    Blocked: {reason}")
+                print(f"    → Risk manager: BLOCKED — {risk_reason}")
+                sys.stdout.flush()
                 continue
 
+            print(f"    → Risk manager: APPROVED — {risk_reason}")
+
             # Execute simulated trade
-            print(f"    SIGNAL: {signal.action} | {signal.reason}")
             if signal.action == "BUY":
                 trade = self.portfolio.execute_buy(
                     signal          = signal,
@@ -283,8 +313,9 @@ class PaperTrader:
                     timestamp       = now,
                 )
                 if trade:
-                    print(f"    TRADE: Bought {trade.shares:.2f} shares @ ${trade.price:.3f} "
-                          f"(cost=${trade.total_cost:.2f})")
+                    print(f"    *** TRADE EXECUTED: BUY {trade.shares:.2f} shares "
+                          f"@ ${trade.price:.4f}  |  cost=${trade.total_cost:.2f}  "
+                          f"|  fee=${trade.fee:.4f}")
                     self.strategy.on_trade_executed(trade)
 
             elif signal.action == "SELL":
@@ -295,16 +326,29 @@ class PaperTrader:
                 )
                 if trade:
                     pnl_sign = "+" if trade.pnl >= 0 else ""
-                    print(f"    TRADE: Sold {trade.shares:.2f} shares @ ${trade.price:.3f} "
-                          f"(PnL={pnl_sign}${trade.pnl:.2f})")
+                    print(f"    *** TRADE EXECUTED: SELL {trade.shares:.2f} shares "
+                          f"@ ${trade.price:.4f}  |  PnL={pnl_sign}${trade.pnl:.2f}")
                     self.strategy.on_trade_executed(trade)
 
-        # Record portfolio value after this tick
+            sys.stdout.flush()
+
+        # Summary line after processing all markets
         total_val = self.portfolio.total_value(current_prices)
         self.equity_curve.append(total_val)
-        print(f"  Portfolio: cash=${self.portfolio.cash:.2f} | "
-              f"positions={len(self.portfolio.positions)} | "
-              f"total=${total_val:.2f}")
+        open_pos  = len(self.portfolio.positions)
+        total_trades = len(self.portfolio.trade_log)
+        print(f"\n  ── Portfolio snapshot ──────────────────────────────")
+        print(f"  Cash:       ${self.portfolio.cash:>10.2f}")
+        print(f"  Positions:  {open_pos} open")
+        for tid, pos in self.portfolio.positions.items():
+            cur_price = current_prices.get(tid, pos.avg_cost)
+            unreal_pnl = (cur_price - pos.avg_cost) * pos.shares
+            sign = "+" if unreal_pnl >= 0 else ""
+            print(f"    {pos.market_slug[:35]:35s} | {pos.shares:.1f} shares "
+                  f"@ avg ${pos.avg_cost:.4f} | unrealised PnL {sign}${unreal_pnl:.2f}")
+        print(f"  Total value: ${total_val:>9.2f}  |  trades so far: {total_trades}")
+        print(f"  ────────────────────────────────────────────────────")
+        sys.stdout.flush()
 
     def _fetch_latest_price(self, token_id: str) -> Optional[PriceBar]:
         """

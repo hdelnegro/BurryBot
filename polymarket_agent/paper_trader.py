@@ -165,10 +165,37 @@ class PaperTrader:
     # ------------------------------------------------------------------
 
     def _load_initial_history(self) -> None:
-        """Fetch historical price bars so the strategy has context from day 1."""
+        """
+        Fetch historical price bars so the strategy has context from the start.
+
+        We use fidelity=60 (hourly bars) for the initial load — enough resolution
+        for the strategy to compute trends, without downloading thousands of bars.
+        """
+        import requests
+        from config import CLOB_API_URL, REQUEST_TIMEOUT_SECONDS, PRICE_HISTORY_INTERVAL
+
         for market in self.markets:
             token_id = market.yes_token_id
-            bars = fetch_price_history(token_id)
+            try:
+                response = requests.get(
+                    CLOB_API_URL,
+                    params={"market": token_id, "interval": PRICE_HISTORY_INTERVAL, "fidelity": 60},
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
+                response.raise_for_status()
+                raw = response.json().get("history", [])
+                bars = [
+                    PriceBar(
+                        token_id  = token_id,
+                        timestamp = datetime.utcfromtimestamp(e["t"]),
+                        price     = float(e["p"]),
+                    )
+                    for e in raw
+                ]
+                bars.sort(key=lambda b: b.timestamp)
+            except Exception:
+                bars = []
+
             if bars:
                 self.price_history[token_id] = bars
                 print(f"  {market.slug[:40]}: {len(bars)} historical bars loaded")
@@ -281,10 +308,12 @@ class PaperTrader:
 
     def _fetch_latest_price(self, token_id: str) -> Optional[PriceBar]:
         """
-        Fetch the most recent price bar for a token.
+        Fetch the most recent price for a token.
 
-        We fetch with fidelity=1 (1-minute bars) to get the very latest price.
-        Then we return just the last bar.
+        Uses interval=1d with fidelity=1 (1-minute bars for the last day).
+        This gives us the freshest price without downloading the entire history.
+        We only return the bar if its timestamp is newer than the last bar we
+        already have (to avoid duplicate entries).
         """
         try:
             import requests
@@ -292,7 +321,7 @@ class PaperTrader:
 
             response = requests.get(
                 CLOB_API_URL,
-                params={"market": token_id, "interval": "1m", "fidelity": 1},
+                params={"market": token_id, "interval": "1d", "fidelity": 1},
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
@@ -303,11 +332,19 @@ class PaperTrader:
                 return None
 
             last = history[-1]
-            return PriceBar(
+            new_bar = PriceBar(
                 token_id  = token_id,
                 timestamp = datetime.utcfromtimestamp(last["t"]),
                 price     = float(last["p"]),
             )
+
+            # Only return the bar if it's newer than what we already have
+            existing = self.price_history.get(token_id, [])
+            if existing and new_bar.timestamp <= existing[-1].timestamp:
+                return None  # Not a new bar yet — no change since last poll
+
+            return new_bar
+
         except Exception:
             return None
 

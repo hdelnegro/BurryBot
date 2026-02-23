@@ -82,10 +82,10 @@ MEAN_REVERSION_Z_THRESHOLD = 1.5
 MEAN_REVERSION_WINDOW = 20
 
 # Minimum price to consider trading (avoids near-zero junk markets)
-MIN_TRADEABLE_PRICE = 0.05
+MIN_TRADEABLE_PRICE = 0.01
 
 # Maximum price to consider trading on the BUY side (near-certain markets are boring)
-MAX_TRADEABLE_PRICE = 0.95
+MAX_TRADEABLE_PRICE = 0.99
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ Modes:
   paper     — Run strategy live on real prices with simulated money
 
 Usage examples:
+  python main.py                                         # interactive setup
   python main.py --strategy momentum
   python main.py --strategy mean_reversion --markets 10 --cash 500
   python main.py --strategy random_baseline --no-fetch
@@ -14,6 +15,7 @@ Usage examples:
   python main.py --strategy mean_reversion --mode paper --markets 10 --duration 120
 
 Run  python main.py --help  for all options.
+Run  python main.py        (no arguments) for interactive setup.
 """
 
 import argparse
@@ -200,12 +202,172 @@ def load_data_for_backtest(num_markets: int, no_fetch: bool):
 
 
 # ---------------------------------------------------------------------------
+# Interactive setup (used when the script is run with no arguments)
+# ---------------------------------------------------------------------------
+
+def interactive_setup() -> argparse.Namespace:
+    """
+    Prompt the user for all settings one by one.
+    Called automatically when main.py is run with no arguments.
+    Returns an argparse.Namespace identical to what the CLI parser would produce.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    # ── Helpers ─────────────────────────────────────────────────────────────
+
+    BOLD  = "\033[1m"
+    CYAN  = "\033[96m"
+    DIM   = "\033[2m"
+    RESET = "\033[0m"
+
+    def pick(prompt, options):
+        """
+        Print a numbered menu and return the value of the chosen option.
+        options: list of (label, description, value) tuples.
+        User can only select by entering the number shown on screen.
+        """
+        print(f"\n{BOLD}{prompt}{RESET}")
+        for i, (label, desc, _) in enumerate(options, 1):
+            line = f"  {i}. {CYAN}{label}{RESET}"
+            if desc:
+                line += f"  {DIM}— {desc}{RESET}"
+            print(line)
+        while True:
+            raw = input(f"Select [1-{len(options)}]: ").strip()
+            if raw.isdigit() and 1 <= int(raw) <= len(options):
+                _, _, value = options[int(raw) - 1]
+                return value
+            print(f"  Please enter a number from 1 to {len(options)}.")
+
+    # ── Header ───────────────────────────────────────────────────────────────
+
+    print()
+    print(BOLD + CYAN + "=" * 55 + RESET)
+    print(BOLD + CYAN + "  BurryBot — Interactive Setup" + RESET)
+    print(BOLD + CYAN + "=" * 55 + RESET)
+    print(DIM + "  (Run with --help to see all CLI flags instead)" + RESET)
+
+    # ── Strategy ─────────────────────────────────────────────────────────────
+
+    strategy = pick("Strategy:", [
+        ("momentum",        "Buy on uptrends, sell on downtrends",          "momentum"),
+        ("mean_reversion",  "Buy when price drops below Z-score threshold", "mean_reversion"),
+        ("random_baseline", "Random trades — performance floor benchmark",  "random_baseline"),
+    ])
+
+    # ── Mode ─────────────────────────────────────────────────────────────────
+
+    mode = pick("Mode:", [
+        ("paper",    "Live prices, simulated trades — no real money",    "paper"),
+        ("backtest", "Replay historical price data (fast, no network)",  "backtest"),
+    ])
+
+    # ── Markets ──────────────────────────────────────────────────────────────
+
+    markets = pick("Markets to watch:", [
+        ("5",  "quick run, fewer signals",           5),
+        ("10", "balanced",                           10),
+        ("20", "good coverage",                      20),
+        ("30", "broad coverage",                     30),
+        ("50", "maximum",                            50),
+    ])
+
+    # ── Starting cash ────────────────────────────────────────────────────────
+
+    cash = pick("Starting virtual cash (USDC):", [
+        ("$500",    "",              500.0),
+        ("$1,000",  "default",       1000.0),
+        ("$2,000",  "",              2000.0),
+        ("$5,000",  "",              5000.0),
+    ])
+
+    # ── Mode-specific options ────────────────────────────────────────────────
+
+    duration  = PAPER_DEFAULT_DURATION_MINUTES
+    dashboard = False
+    no_fetch  = False
+
+    if mode == "paper":
+
+        # Duration via end datetime
+        print(f"\n{BOLD}Session end date/time:{RESET}")
+        print(f"  Format : {CYAN}YYYYMMDDhhmm{RESET}  (ART — Buenos Aires time, UTC-3)")
+        print(f"  Example: {DIM}202602241000{RESET}  = 24 Feb 2026 at 10:00am ART")
+        while True:
+            raw = input("  End time: ").strip()
+            if len(raw) == 12 and raw.isdigit():
+                try:
+                    end_local = datetime.strptime(raw, "%Y%m%d%H%M")
+                    end_utc   = end_local.replace(tzinfo=timezone(timedelta(hours=-3)))
+                    now_utc   = datetime.now(timezone.utc)
+                    duration  = int((end_utc - now_utc).total_seconds() / 60)
+                    if duration <= 0:
+                        print("  That time is already in the past. Enter a future date/time.")
+                        continue
+                    h, m = divmod(duration, 60)
+                    print(f"  → {h}h {m}m from now  (until {end_utc.strftime('%Y-%m-%d %H:%M UTC')})")
+                    break
+                except ValueError:
+                    pass
+            print("  Invalid — use exactly 12 digits: YYYYMMDDhhmm")
+
+        dashboard = pick("Live dashboard at http://localhost:5000?", [
+            ("Yes", "open in your browser for live charts and metrics", True),
+            ("No",  "console output only",                              False),
+        ])
+
+    else:  # backtest
+
+        no_fetch = pick("Data source:", [
+            ("Fetch fresh", "download latest data from Polymarket API", False),
+            ("Cache only",  "use previously downloaded CSVs (faster)",  True),
+        ])
+
+    # ── Confirm ──────────────────────────────────────────────────────────────
+
+    print()
+    print(BOLD + "─" * 55 + RESET)
+    print(f"  Strategy : {CYAN}{strategy}{RESET}")
+    print(f"  Mode     : {CYAN}{mode}{RESET}")
+    print(f"  Markets  : {markets}")
+    print(f"  Cash     : ${cash:,.0f}")
+    if mode == "paper":
+        h, m = divmod(duration, 60)
+        print(f"  Duration : {h}h {m}m  ({duration} min)")
+        print(f"  Dashboard: {'yes' if dashboard else 'no'}")
+    else:
+        print(f"  No-fetch : {'yes' if no_fetch else 'no'}")
+    print(BOLD + "─" * 55 + RESET)
+
+    confirm = pick("Start?", [
+        ("Yes", "run with the settings above",    True),
+        ("No",  "abort and exit",                 False),
+    ])
+    if not confirm:
+        print("Aborted.")
+        sys.exit(0)
+
+    return argparse.Namespace(
+        strategy  = strategy,
+        mode      = mode,
+        markets   = markets,
+        cash      = cash,
+        duration  = duration,
+        dashboard = dashboard,
+        no_fetch  = no_fetch,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = build_arg_parser()
-    args   = parser.parse_args()
+    if len(sys.argv) == 1:
+        args = interactive_setup()
+    else:
+        parser = build_arg_parser()
+        args   = parser.parse_args()
 
     mode_label = "Paper Trading" if args.mode == "paper" else "Backtesting"
 

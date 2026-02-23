@@ -2,7 +2,7 @@
 dashboard.py — Live web dashboard for the paper trading session.
 
 Serves a browser dashboard at http://localhost:5000
-The page auto-refreshes every 10 seconds by polling /api/state,
+The page auto-refreshes every 1 second by polling /api/state,
 which reads data/state.json written by the paper trader after every tick.
 
 Start automatically via:
@@ -144,6 +144,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div id="status-pill">
     <span class="dot"></span>
     <span id="last-update">connecting…</span>
+    <span style="color:var(--border);margin:0 4px;">|</span>
+    <span style="color:var(--muted);font-size:10px;">hb:<span id="hb-count">0</span></span>
   </div>
 </header>
 
@@ -218,154 +220,203 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </main>
 
 <script>
-// ─── Chart setup ────────────────────────────────────────────────────────────
-const ctx = document.getElementById('equity-chart').getContext('2d');
-const equityChart = new Chart(ctx, {
-  type: 'line',
-  data: {
-    labels: [],
-    datasets: [{
-      label: 'Portfolio Value ($)',
-      data: [],
-      borderColor: '#667eea',
-      backgroundColor: 'rgba(102,126,234,0.12)',
-      borderWidth: 2,
-      pointRadius: 3,
-      pointBackgroundColor: '#667eea',
-      tension: 0.3,
-      fill: true,
-    }]
-  },
-  options: {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: { duration: 400 },
-    plugins: { legend: { display: false } },
-    scales: {
-      x: { ticks: { color: '#718096', font: { size: 10 } }, grid: { color: '#1e2130' } },
-      y: { ticks: { color: '#718096', font: { size: 10 },
-                    callback: v => '$' + v.toFixed(2) },
-           grid: { color: '#1e2130' } }
-    }
+// ─── Error banner (visible on page if JS crashes) ────────────────────────────
+function showError(msg) {
+  let el = document.getElementById('js-error-banner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'js-error-banner';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#e53e3e;color:#fff;' +
+                       'padding:6px 14px;font-size:12px;z-index:9999;font-family:monospace;';
+    document.body.prepend(el);
   }
-});
+  el.textContent = '⚠ JS error: ' + msg;
+}
+
+// ─── Chart setup (optional — gracefully skipped if Chart.js CDN unavailable) ─
+let equityChart = null;
+try {
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Portfolio Value ($)',
+        data: [],
+        borderColor: '#667eea',
+        backgroundColor: 'rgba(102,126,234,0.12)',
+        borderWidth: 2,
+        pointRadius: 0,          // no dots — faster with many data points
+        tension: 0.3,
+        fill: true,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,           // disable animation for live updates
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#718096', font: { size: 10 } }, grid: { color: '#1e2130' } },
+        y: { ticks: { color: '#718096', font: { size: 10 },
+                      callback: v => '$' + v.toFixed(2) },
+             grid: { color: '#1e2130' } }
+      }
+    }
+  });
+} catch (e) {
+  document.getElementById('chart-wrap').innerHTML =
+    '<div style="color:var(--muted);text-align:center;padding:60px 0;font-size:12px;">' +
+    'Chart unavailable (Chart.js failed to load)</div>';
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function fmt$(v)   { return '$' + parseFloat(v).toFixed(2); }
 function fmtPct(v) { const n = parseFloat(v); return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
 function fmtMin(m) {
+  if (!isFinite(m) || m <= 0) return '0m';
   const h = Math.floor(m / 60), mm = Math.round(m % 60);
   return h > 0 ? `${h}h ${mm}m` : `${mm}m`;
 }
-function colorClass(v) { return parseFloat(v) > 0 ? 'pos' : (parseFloat(v) < 0 ? 'neg' : 'neu'); }
+function colorClass(v) { const n = parseFloat(v); return n > 0 ? 'pos' : (n < 0 ? 'neg' : 'neu'); }
 function badgeClass(action) {
   return { BUY: 'badge-buy', SELL: 'badge-sell', HOLD: 'badge-hold' }[action] || 'badge-hold';
 }
 function timeLabel(iso) {
-  const d = new Date(iso + 'Z');
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  try {
+    // isoformat() produces "2026-02-23T22:00:00.123456" — append Z for UTC
+    const s = String(iso).replace(/(\.\d{3})\d+/, '$1');  // truncate microseconds → ms
+    const d = new Date(s.endsWith('Z') ? s : s + 'Z');
+    if (!isFinite(d)) return iso;
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch { return String(iso); }
 }
 
-// ─── Main refresh ────────────────────────────────────────────────────────────
+// ─── Heartbeat counter (ticks up every second regardless of fetch result) ────
+let heartbeat = 0;
+setInterval(() => {
+  heartbeat++;
+  const hbEl = document.getElementById('hb-count');
+  if (hbEl) hbEl.textContent = heartbeat;
+}, 1000);
+
+// ─── Main refresh (recursive setTimeout — never piles up) ────────────────────
 async function refresh() {
+  // Step 1: fetch state (errors here are expected during startup — silent)
   let data;
   try {
-    const res = await fetch('/api/state?t=' + Date.now(), {cache: 'no-store'});
-    if (!res.ok) return;
+    const res = await fetch('/api/state?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) { scheduleNext(); return; }
     data = await res.json();
-  } catch { return; }
+  } catch { scheduleNext(); return; }
 
-  const p = data.portfolio;
-  const m = data.metrics;
+  // Step 2: update DOM — wrapped so any bug shows visibly on the page
+  try {
+    const p = data.portfolio;
+    const m = data.metrics;
 
-  // KPI cards
-  document.getElementById('kpi-total').textContent   = fmt$(p.total_value);
-  document.getElementById('kpi-start').textContent   = fmt$(p.starting_cash);
+    // KPI cards
+    document.getElementById('kpi-total').textContent  = fmt$(p.total_value);
+    document.getElementById('kpi-start').textContent  = fmt$(p.starting_cash);
 
-  const retEl = document.getElementById('kpi-return');
-  retEl.textContent = fmtPct(p.total_return_pct);
-  retEl.className   = 'value ' + colorClass(p.total_return_pct);
+    const retEl = document.getElementById('kpi-return');
+    retEl.textContent = fmtPct(p.total_return_pct);
+    retEl.className   = 'value ' + colorClass(p.total_return_pct);
 
-  document.getElementById('kpi-cash').textContent    = 'cash: ' + fmt$(p.cash);
-  document.getElementById('kpi-sharpe').textContent  = isNaN(m.sharpe_ratio) ? '—' : m.sharpe_ratio.toFixed(4);
+    document.getElementById('kpi-cash').textContent   = 'cash: ' + fmt$(p.cash);
 
-  const ddEl = document.getElementById('kpi-drawdown');
-  ddEl.textContent = fmtPct(m.max_drawdown_pct);
-  ddEl.className   = 'value ' + (m.max_drawdown_pct > 0 ? 'neg' : 'neu');
+    const sharpe = parseFloat(m.sharpe_ratio);
+    document.getElementById('kpi-sharpe').textContent = isFinite(sharpe) ? sharpe.toFixed(4) : '—';
 
-  document.getElementById('kpi-winrate').textContent  = m.win_rate_pct.toFixed(1) + '%';
-  document.getElementById('kpi-trades').textContent   = p.total_trades + ' trades (' + p.sell_trades + ' sells)';
-  document.getElementById('kpi-remaining').textContent = fmtMin(data.remaining_minutes);
-  document.getElementById('kpi-tick').textContent     = data.tick;
-  document.getElementById('kpi-strategy').textContent = data.strategy;
+    const ddEl = document.getElementById('kpi-drawdown');
+    ddEl.textContent = fmtPct(m.max_drawdown_pct);
+    ddEl.className   = 'value ' + (parseFloat(m.max_drawdown_pct) > 0 ? 'neg' : 'neu');
 
-  const elapsed = data.elapsed_minutes;
-  const total   = data.duration_minutes;
-  document.getElementById('time-bar').style.width = Math.min(100, elapsed / total * 100) + '%';
+    document.getElementById('kpi-winrate').textContent = parseFloat(m.win_rate_pct).toFixed(1) + '%';
+    document.getElementById('kpi-trades').textContent  = p.total_trades + ' trades (' + p.sell_trades + ' sells)';
+    document.getElementById('kpi-remaining').textContent = fmtMin(data.remaining_minutes);
+    document.getElementById('kpi-tick').textContent    = data.tick;
+    document.getElementById('kpi-strategy').textContent = data.strategy;
 
-  // Equity curve
-  const curve = data.equity_curve || [];
-  equityChart.data.labels  = curve.map((_, i) => 'T' + (i + 1));
-  equityChart.data.datasets[0].data = curve;
-  equityChart.update('none');
+    const elapsed = parseFloat(data.elapsed_minutes) || 0;
+    const total   = parseFloat(data.duration_minutes) || 1;
+    document.getElementById('time-bar').style.width = Math.min(100, elapsed / total * 100) + '%';
 
-  // Market signals
-  const sigBody = document.getElementById('signals-body');
-  if (data.market_signals && data.market_signals.length) {
-    sigBody.innerHTML = data.market_signals.map(s => `
-      <tr>
-        <td>
-          <div style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-               title="${s.question}">${s.slug.replace(/-/g,' ')}</div>
-          <div class="reason-text">${s.reason}</div>
-        </td>
-        <td>${parseFloat(s.price).toFixed(4)}</td>
-        <td><span class="badge ${badgeClass(s.signal)}">${s.signal}</span></td>
-      </tr>`).join('');
-  } else {
-    sigBody.innerHTML = '<tr><td colspan="3" class="no-data">waiting for first tick…</td></tr>';
+    // Equity curve (only update if chart loaded successfully)
+    if (equityChart) {
+      const curve = data.equity_curve || [];
+      equityChart.data.labels              = curve.map((_, i) => 'T' + (i + 1));
+      equityChart.data.datasets[0].data    = curve;
+      equityChart.update();
+    }
+
+    // Market signals
+    const sigBody = document.getElementById('signals-body');
+    if (data.market_signals && data.market_signals.length) {
+      sigBody.innerHTML = data.market_signals.map(s => `
+        <tr>
+          <td>
+            <div style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                 title="${s.question || ''}">${(s.slug || '').replace(/-/g,' ')}</div>
+            <div class="reason-text">${s.reason || ''}</div>
+          </td>
+          <td>${parseFloat(s.price).toFixed(4)}</td>
+          <td><span class="badge ${badgeClass(s.signal)}">${s.signal}</span></td>
+        </tr>`).join('');
+    } else {
+      sigBody.innerHTML = '<tr><td colspan="3" class="no-data">waiting for first tick…</td></tr>';
+    }
+
+    // Open positions
+    const posBody = document.getElementById('positions-body');
+    if (data.positions && data.positions.length) {
+      posBody.innerHTML = data.positions.map(pos => `
+        <tr>
+          <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+              title="${pos.market_slug || ''}">${(pos.market_slug || '').replace(/-/g,' ')}</td>
+          <td>${parseFloat(pos.shares).toFixed(0)}</td>
+          <td>${parseFloat(pos.avg_cost).toFixed(4)}</td>
+          <td>${parseFloat(pos.current_price).toFixed(4)}</td>
+          <td class="${colorClass(pos.unrealised_pnl)}">${parseFloat(pos.unrealised_pnl) >= 0 ? '+' : ''}${parseFloat(pos.unrealised_pnl).toFixed(2)}</td>
+        </tr>`).join('');
+    } else {
+      posBody.innerHTML = '<tr><td colspan="5" class="no-data">no open positions</td></tr>';
+    }
+
+    // Recent trades
+    const trBody = document.getElementById('trades-body');
+    if (data.recent_trades && data.recent_trades.length) {
+      trBody.innerHTML = data.recent_trades.map(t => `
+        <tr>
+          <td>${timeLabel(t.timestamp)}</td>
+          <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+              title="${t.market_slug || ''}">${(t.market_slug || '').replace(/-/g,' ')}</td>
+          <td><span class="badge ${badgeClass(t.action)}">${t.action}</span></td>
+          <td>${parseFloat(t.price).toFixed(4)}</td>
+          <td class="${colorClass(t.pnl)}">${t.action === 'BUY' ? '—' : ((parseFloat(t.pnl) >= 0 ? '+' : '') + parseFloat(t.pnl).toFixed(2))}</td>
+        </tr>`).join('');
+    } else {
+      trBody.innerHTML = '<tr><td colspan="5" class="no-data">no trades yet</td></tr>';
+    }
+
+    // Status pill — use browser's local time (avoids issues with server timestamp format)
+    document.getElementById('last-update').textContent =
+      'tick ' + data.tick + ' · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  } catch (e) {
+    showError(e.message);
   }
 
-  // Open positions
-  const posBody = document.getElementById('positions-body');
-  if (data.positions && data.positions.length) {
-    posBody.innerHTML = data.positions.map(pos => `
-      <tr>
-        <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-            title="${pos.market_slug}">${pos.market_slug.replace(/-/g,' ')}</td>
-        <td>${parseFloat(pos.shares).toFixed(0)}</td>
-        <td>${parseFloat(pos.avg_cost).toFixed(4)}</td>
-        <td>${parseFloat(pos.current_price).toFixed(4)}</td>
-        <td class="${colorClass(pos.unrealised_pnl)}">${pos.unrealised_pnl >= 0 ? '+' : ''}${parseFloat(pos.unrealised_pnl).toFixed(2)}</td>
-      </tr>`).join('');
-  } else {
-    posBody.innerHTML = '<tr><td colspan="5" class="no-data">no open positions</td></tr>';
-  }
-
-  // Recent trades
-  const trBody = document.getElementById('trades-body');
-  if (data.recent_trades && data.recent_trades.length) {
-    trBody.innerHTML = data.recent_trades.map(t => `
-      <tr>
-        <td>${timeLabel(t.timestamp)}</td>
-        <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-            title="${t.market_slug}">${t.market_slug.replace(/-/g,' ')}</td>
-        <td><span class="badge ${badgeClass(t.action)}">${t.action}</span></td>
-        <td>${parseFloat(t.price).toFixed(4)}</td>
-        <td class="${colorClass(t.pnl)}">${t.action === 'BUY' ? '—' : ((t.pnl >= 0 ? '+' : '') + parseFloat(t.pnl).toFixed(2))}</td>
-      </tr>`).join('');
-  } else {
-    trBody.innerHTML = '<tr><td colspan="5" class="no-data">no trades yet</td></tr>';
-  }
-
-  // Status pill
-  const ts = new Date(data.updated_at + 'Z');
-  document.getElementById('last-update').textContent =
-    'last tick ' + ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  scheduleNext();
 }
 
+function scheduleNext() {
+  setTimeout(refresh, 1000);
+}
+
+// Kick off the first poll immediately
 refresh();
-setInterval(refresh, 1_000);
 </script>
 </body>
 </html>

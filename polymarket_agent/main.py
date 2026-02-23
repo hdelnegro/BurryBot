@@ -28,6 +28,7 @@ from config import (
     DEFAULT_STARTING_CASH,
     PAPER_DEFAULT_DURATION_MINUTES,
 )
+from dashboard import start_in_thread as start_dashboard
 from data_fetcher import fetch_markets, fetch_price_history
 from data_storage import (
     save_markets, load_markets, markets_cache_exists,
@@ -122,6 +123,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no-fetch",
         action="store_true",
         help="[backtest only] Skip API fetch, use cached data only",
+    )
+
+    parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="[paper mode only] Start a live web dashboard at http://localhost:5000",
     )
 
     return parser
@@ -225,6 +232,9 @@ def main():
     # PAPER TRADING MODE
     # ----------------------------------------------------------------
     if args.mode == "paper":
+        if args.dashboard:
+            start_dashboard(host="127.0.0.1", port=5000)
+
         trader = PaperTrader(
             strategy         = strategy,
             portfolio        = portfolio,

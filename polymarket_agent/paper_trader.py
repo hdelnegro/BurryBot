@@ -17,6 +17,8 @@ The session runs for --duration minutes, then prints the final results.
 Press Ctrl+C at any time to stop early.
 """
 
+import json
+import os
 import time
 import signal
 import sys
@@ -25,7 +27,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from config import PAPER_POLL_INTERVAL_SECONDS
+from config import PAPER_POLL_INTERVAL_SECONDS, DATA_DIR
 from data_fetcher import fetch_markets, fetch_price_history
 from models import Market, PriceBar, Signal
 from portfolio import Portfolio
@@ -94,6 +96,14 @@ class PaperTrader:
         # Track the tick count for display
         self.tick_count = 0
 
+        # Session timing (set at run() time)
+        self.session_start: Optional[datetime] = None
+        self.session_end:   Optional[datetime] = None
+
+        # Latest signal per market (for dashboard display)
+        # Dict: token_id → {"slug", "question", "price", "signal", "reason", "confidence"}
+        self.latest_signals: Dict[str, dict] = {}
+
     def run(self) -> dict:
         """
         Main loop: runs for self.duration_minutes, polling every POLL_INTERVAL seconds.
@@ -128,8 +138,10 @@ class PaperTrader:
         print("\nFetching initial price history...")
         self._load_initial_history()
 
-        # Step 3: Set session end time
-        end_time = datetime.utcnow() + timedelta(minutes=self.duration_minutes)
+        # Step 3: Set session timing
+        self.session_start = datetime.utcnow()
+        end_time = self.session_start + timedelta(minutes=self.duration_minutes)
+        self.session_end = end_time
         print(f"\nSession runs until {end_time.strftime('%H:%M:%S UTC')} "
               f"({self.duration_minutes} minutes from now)")
         print("Press Ctrl+C to stop early.\n")
@@ -138,6 +150,7 @@ class PaperTrader:
         # Step 4: Main polling loop
         while datetime.utcnow() < end_time and not _stop_requested:
             self._run_tick()
+            self._write_state()
 
             # Wait for the next poll (or exit if time is up / Ctrl+C)
             next_tick = datetime.utcnow() + timedelta(seconds=PAPER_POLL_INTERVAL_SECONDS)
@@ -287,6 +300,17 @@ class PaperTrader:
                   f"{signal.reason}")
             sys.stdout.flush()
 
+            # Record for dashboard
+            self.latest_signals[token_id] = {
+                "slug":       market.slug,
+                "question":   market.question,
+                "price":      latest_bar.price,
+                "signal":     signal.action,
+                "reason":     signal.reason,
+                "confidence": signal.confidence,
+                "updated_at": latest_bar.timestamp.isoformat(),
+            }
+
             if signal.action == "HOLD":
                 continue
 
@@ -391,6 +415,98 @@ class PaperTrader:
 
         except Exception:
             return None
+
+    def _write_state(self) -> None:
+        """
+        Write the current session state to data/state.json.
+
+        The dashboard reads this file every few seconds to refresh the display.
+        We write atomically (temp file + rename) so the dashboard never reads
+        a half-written file.
+        """
+        now = datetime.utcnow()
+        elapsed = (now - self.session_start).total_seconds() / 60 if self.session_start else 0
+        remaining = max(0, (self.session_end - now).total_seconds() / 60) if self.session_end else 0
+
+        # Current prices from latest known bars
+        current_prices = self._get_latest_prices()
+
+        # Portfolio snapshot
+        total_val = self.portfolio.total_value(current_prices)
+        pct_return = (total_val - self.portfolio.starting_cash) / self.portfolio.starting_cash * 100
+
+        # Open positions
+        positions_list = []
+        for tid, pos in self.portfolio.positions.items():
+            cur_price  = current_prices.get(tid, pos.avg_cost)
+            unreal_pnl = (cur_price - pos.avg_cost) * pos.shares
+            positions_list.append({
+                "market_slug":   pos.market_slug,
+                "outcome":       pos.outcome,
+                "shares":        round(pos.shares, 4),
+                "avg_cost":      round(pos.avg_cost, 6),
+                "current_price": round(cur_price, 6),
+                "unrealised_pnl": round(unreal_pnl, 4),
+                "opened_at":     pos.opened_at.isoformat(),
+            })
+
+        # Recent trades (last 20)
+        trades_list = []
+        for t in self.portfolio.trade_log[-20:]:
+            trades_list.append({
+                "trade_id":   t.trade_id,
+                "market_slug": t.market_slug,
+                "action":     t.action,
+                "outcome":    t.outcome,
+                "shares":     round(t.shares, 4),
+                "price":      round(t.price, 6),
+                "total_cost": round(t.total_cost, 4),
+                "pnl":        round(t.pnl, 4),
+                "timestamp":  t.timestamp.isoformat(),
+            })
+
+        # Compute live metrics
+        import metrics as metrics_module
+        sell_trades = [t for t in self.portfolio.trade_log if t.action == "SELL"]
+        sharpe   = metrics_module.compute_sharpe_ratio(self.equity_curve)
+        max_dd   = metrics_module.compute_max_drawdown(self.equity_curve)
+        win_rate = metrics_module.compute_win_rate(self.portfolio.trade_log)
+
+        state = {
+            "updated_at":       now.isoformat(),
+            "tick":             self.tick_count,
+            "strategy":         self.strategy.name,
+            "duration_minutes": self.duration_minutes,
+            "elapsed_minutes":  round(elapsed, 1),
+            "remaining_minutes": round(remaining, 1),
+            "session_start":    self.session_start.isoformat() if self.session_start else None,
+            "session_end":      self.session_end.isoformat()   if self.session_end   else None,
+            "portfolio": {
+                "cash":          round(self.portfolio.cash, 4),
+                "total_value":   round(total_val, 4),
+                "starting_cash": self.portfolio.starting_cash,
+                "total_return_pct": round(pct_return, 4),
+                "open_positions": len(self.portfolio.positions),
+                "total_trades":  len(self.portfolio.trade_log),
+                "sell_trades":   len(sell_trades),
+            },
+            "metrics": {
+                "sharpe_ratio":    round(sharpe, 4),
+                "max_drawdown_pct": round(max_dd, 4),
+                "win_rate_pct":    round(win_rate, 4),
+            },
+            "equity_curve":  [round(v, 4) for v in self.equity_curve],
+            "positions":     positions_list,
+            "recent_trades": list(reversed(trades_list)),
+            "market_signals": list(self.latest_signals.values()),
+        }
+
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp_path   = os.path.join(DATA_DIR, "state.json.tmp")
+        state_path = os.path.join(DATA_DIR, "state.json")
+        with open(tmp_path, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, state_path)
 
     def _close_all_positions(self, final_prices: Dict[str, float]) -> None:
         """Liquidate all remaining positions at end of session."""

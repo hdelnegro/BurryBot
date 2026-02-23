@@ -255,13 +255,15 @@ try {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      animation: false,           // disable animation for live updates
+      animation: { duration: 0 },  // instant updates, no transition delay
       plugins: { legend: { display: false } },
       scales: {
         x: { ticks: { color: '#718096', font: { size: 10 } }, grid: { color: '#1e2130' } },
-        y: { ticks: { color: '#718096', font: { size: 10 },
-                      callback: v => '$' + v.toFixed(2) },
-             grid: { color: '#1e2130' } }
+        y: {
+          grace: '5%',             // always show some y-range even on a flat equity curve
+          ticks: { color: '#718096', font: { size: 10 }, callback: v => '$' + v.toFixed(2) },
+          grid: { color: '#1e2130' }
+        }
       }
     }
   });
@@ -348,7 +350,7 @@ async function refresh() {
       const curve = data.equity_curve || [];
       equityChart.data.labels              = curve.map((_, i) => 'T' + (i + 1));
       equityChart.data.datasets[0].data    = curve;
-      equityChart.update();
+      equityChart.update('none');
     }
 
     // Market signals

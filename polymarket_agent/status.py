@@ -42,9 +42,8 @@ def fmt_remaining(minutes):
 
 # ── Load ─────────────────────────────────────────────────────────────────────
 if not os.path.exists(STATE_FILE):
-    print(col("No state.json found.", RED) + " Is the paper trader running?")
-    print(f"Expected: {STATE_FILE}")
-    sys.exit(1)
+    print(col("No agent running.", RED, BOLD) + " (no state.json found)")
+    sys.exit(0)
 
 with open(STATE_FILE) as f:
     d = json.load(f)
@@ -55,7 +54,8 @@ pos = d.get("positions", [])
 trades = d.get("recent_trades", [])
 signals = d.get("market_signals", [])
 
-# Updated-at age
+# Updated-at age — stale if older than 10 minutes (2× poll interval)
+STALE_AFTER_SECONDS = 360  # 1 missed poll (5 min) + 1 min grace
 try:
     updated = datetime.fromisoformat(d["updated_at"])
     if updated.tzinfo is None:
@@ -63,7 +63,13 @@ try:
     age_sec = (datetime.now(timezone.utc) - updated).total_seconds()
     age_str = f"{int(age_sec)}s ago"
 except Exception:
+    age_sec = STALE_AFTER_SECONDS + 1
     age_str = d.get("updated_at", "?")
+
+if age_sec > STALE_AFTER_SECONDS:
+    print(col("No agent running.", RED, BOLD) +
+          f" (last state.json is {int(age_sec)}s old — session ended or crashed)")
+    sys.exit(0)
 
 # ── Print ─────────────────────────────────────────────────────────────────────
 W = 56

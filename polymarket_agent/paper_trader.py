@@ -17,15 +17,20 @@ The session runs for --duration minutes, then prints the final results.
 Press Ctrl+C at any time to stop early.
 """
 
+import json
+import os
 import time
 import signal
 import sys
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional, Set
 
 import pandas as pd
 
-from config import PAPER_POLL_INTERVAL_SECONDS
+from config import (
+    PAPER_POLL_INTERVAL_SECONDS, DATA_DIR,
+    MARKET_REFRESH_INTERVAL_TICKS, MAX_WATCHED_MARKETS,
+)
 from data_fetcher import fetch_markets, fetch_price_history
 from models import Market, PriceBar, Signal
 from portfolio import Portfolio
@@ -94,6 +99,20 @@ class PaperTrader:
         # Track the tick count for display
         self.tick_count = 0
 
+        # Session timing (set at run() time)
+        self.session_start: Optional[datetime] = None
+        self.session_end:   Optional[datetime] = None
+
+        # Latest signal per market (for dashboard display)
+        # Dict: token_id → {"slug", "question", "price", "signal", "reason", "confidence"}
+        self.latest_signals: Dict[str, dict] = {}
+
+        # token_ids already seen — prevents re-downloading history on refresh
+        self._known_token_ids: Set[str] = set()
+
+        # token_ids confirmed expired/resolved — never re-watch
+        self._expired_token_ids: Set[str] = set()
+
     def run(self) -> dict:
         """
         Main loop: runs for self.duration_minutes, polling every POLL_INTERVAL seconds.
@@ -113,23 +132,17 @@ class PaperTrader:
         print("-" * 55)
         _sys.stdout.flush()
 
-        # Step 1: Fetch active markets
+        # Step 1: Fetch active markets and initial price history
         print("\nFetching active markets...")
-        self.markets = fetch_markets(limit=self.num_markets, active_only=True)
+        self._refresh_markets(initial=True)
         if not self.markets:
             print("ERROR: No active markets found.")
             return {}
 
-        print(f"Watching {len(self.markets)} markets:")
-        for m in self.markets:
-            print(f"  - {m.question[:60]}")
-
-        # Step 2: Fetch initial price history to warm up the strategy
-        print("\nFetching initial price history...")
-        self._load_initial_history()
-
-        # Step 3: Set session end time
-        end_time = datetime.utcnow() + timedelta(minutes=self.duration_minutes)
+        # Step 3: Set session timing
+        self.session_start = datetime.utcnow()
+        end_time = self.session_start + timedelta(minutes=self.duration_minutes)
+        self.session_end = end_time
         print(f"\nSession runs until {end_time.strftime('%H:%M:%S UTC')} "
               f"({self.duration_minutes} minutes from now)")
         print("Press Ctrl+C to stop early.\n")
@@ -137,7 +150,14 @@ class PaperTrader:
 
         # Step 4: Main polling loop
         while datetime.utcnow() < end_time and not _stop_requested:
+            # Periodically refresh market list to pick up new markets (e.g. hourly BTC up/down)
+            if self.tick_count > 0 and self.tick_count % MARKET_REFRESH_INTERVAL_TICKS == 0:
+                print("\n[Market Refresh] Re-fetching market list for new/expired markets...")
+                sys.stdout.flush()
+                self._refresh_markets(initial=False)
+
             self._run_tick()
+            self._write_state()
 
             # Wait for the next poll (or exit if time is up / Ctrl+C)
             next_tick = datetime.utcnow() + timedelta(seconds=PAPER_POLL_INTERVAL_SECONDS)
@@ -166,18 +186,152 @@ class PaperTrader:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _load_initial_history(self) -> None:
+    def _refresh_markets(self, initial: bool = False) -> None:
         """
-        Fetch historical price bars so the strategy has context from the start.
+        Fetch the current top-volume active market list and update self.markets.
 
-        We use fidelity=60 (hourly bars) for the initial load — enough resolution
-        for the strategy to compute trends, without downloading thousands of bars.
+        On initial call: populates self.markets and loads price history for all.
+        On subsequent calls (every MARKET_REFRESH_INTERVAL_TICKS ticks):
+          - Detects newly opened markets → adds them and loads their history.
+          - Detects expired/resolved markets → removes them and closes positions.
+          - Respects MAX_WATCHED_MARKETS cap.
+
+        This is critical for short-lived markets like "Bitcoin Up or Down - 2PM ET"
+        which open and resolve every hour.
         """
+        # Fetch more than we need so we have room to filter
+        fetch_limit = max(self.num_markets * 2, MAX_WATCHED_MARKETS)
+        fresh = fetch_markets(limit=fetch_limit, active_only=True)
+
+        now_utc = datetime.now(timezone.utc)
+
+        # Filter out already-expired markets and markets we've blacklisted
+        def is_usable(m: Market) -> bool:
+            if m.yes_token_id in self._expired_token_ids:
+                return False
+            if m.end_date:
+                try:
+                    end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
+                    if end.tzinfo is None:
+                        end = end.replace(tzinfo=timezone.utc)
+                    if end <= now_utc:
+                        return False
+                except ValueError:
+                    pass
+            return True
+
+        usable = [m for m in fresh if is_usable(m)]
+
+        if initial:
+            # First run — take the top N
+            self.markets = usable[:self.num_markets]
+            print(f"Watching {len(self.markets)} markets:")
+            for m in self.markets:
+                print(f"  - {m.question[:65]}")
+            sys.stdout.flush()
+            print("\nFetching initial price history...")
+            sys.stdout.flush()
+            self._load_history_for_markets(self.markets)
+        else:
+            # Refresh run — handle expired and add new
+            self._handle_expired_markets(usable)
+
+            current_ids = {m.yes_token_id for m in self.markets}
+            new_markets  = [
+                m for m in usable
+                if m.yes_token_id not in current_ids
+                and m.yes_token_id not in self._known_token_ids
+            ]
+
+            added = []
+            for m in new_markets:
+                if len(self.markets) >= MAX_WATCHED_MARKETS:
+                    break
+                self.markets.append(m)
+                added.append(m)
+
+            if added:
+                print(f"  Added {len(added)} new market(s):")
+                for m in added:
+                    print(f"    + {m.question[:65]}")
+                sys.stdout.flush()
+                self._load_history_for_markets(added)
+            else:
+                print(f"  No new markets. Watching {len(self.markets)} markets.")
+                sys.stdout.flush()
+
+    def _handle_expired_markets(self, current_active: List[Market]) -> None:
+        """
+        Detect markets that have expired since the last refresh.
+
+        A market is considered expired if:
+          - Its end_date is in the past, OR
+          - It no longer appears in the fresh active market list.
+
+        For expired markets with open positions, we force-close at the last known price.
+        """
+        active_ids = {m.yes_token_id for m in current_active}
+        now_utc    = datetime.now(timezone.utc)
+        expired    = []
+
+        for m in list(self.markets):
+            is_gone = m.yes_token_id not in active_ids
+            past_end = False
+            if m.end_date:
+                try:
+                    end = datetime.fromisoformat(m.end_date.replace("Z", "+00:00"))
+                    if end.tzinfo is None:
+                        end = end.replace(tzinfo=timezone.utc)
+                    past_end = end <= now_utc
+                except ValueError:
+                    pass
+
+            if is_gone or past_end:
+                expired.append(m)
+
+        if not expired:
+            return
+
+        print(f"  Expired/resolved {len(expired)} market(s):")
+        final_prices = self._get_latest_prices()
+
+        for m in expired:
+            print(f"    ✗ {m.question[:65]}")
+            self._expired_token_ids.add(m.yes_token_id)
+            self.markets = [x for x in self.markets if x.yes_token_id != m.yes_token_id]
+
+            # Force-close any open position
+            pos = self.portfolio.positions.get(m.yes_token_id)
+            if pos:
+                price = final_prices.get(m.yes_token_id, pos.avg_cost)
+                sell_signal = Signal(
+                    action="SELL", token_id=m.yes_token_id, outcome=pos.outcome,
+                    price=price, reason="Market expired — forced close", confidence=1.0,
+                )
+                trade = self.portfolio.execute_sell(
+                    signal=sell_signal, market_slug=m.slug, timestamp=now_utc,
+                )
+                if trade:
+                    pnl_sign = "+" if trade.pnl >= 0 else ""
+                    print(f"      → Position closed: {pnl_sign}${trade.pnl:.2f} PnL")
+
+            # Clean up history to save memory (keep last 100 bars)
+            hist = self.price_history.get(m.yes_token_id, [])
+            if len(hist) > 100:
+                self.price_history[m.yes_token_id] = hist[-100:]
+
+        sys.stdout.flush()
+
+    def _load_history_for_markets(self, markets: List[Market]) -> None:
+        """Load initial hourly price history for a list of markets."""
         import requests
         from config import CLOB_API_URL, REQUEST_TIMEOUT_SECONDS, PRICE_HISTORY_INTERVAL
 
-        for market in self.markets:
+        for market in markets:
             token_id = market.yes_token_id
+            if token_id in self._known_token_ids:
+                continue  # already have history
+
             try:
                 response = requests.get(
                     CLOB_API_URL,
@@ -198,12 +352,19 @@ class PaperTrader:
             except Exception:
                 bars = []
 
-            if bars:
-                self.price_history[token_id] = bars
-                print(f"  {market.slug[:40]}: {len(bars)} historical bars loaded")
-            else:
-                self.price_history[token_id] = []
-                print(f"  {market.slug[:40]}: no history (fresh market)")
+            self.price_history.setdefault(token_id, [])
+            # Merge: only add bars newer than what we already have
+            existing_ts = {b.timestamp for b in self.price_history[token_id]}
+            new_bars = [b for b in bars if b.timestamp not in existing_ts]
+            self.price_history[token_id].extend(new_bars)
+            self.price_history[token_id].sort(key=lambda b: b.timestamp)
+
+            n = len(self.price_history[token_id])
+            tag = "(new)" if token_id not in self._known_token_ids else "(updated)"
+            print(f"  {market.slug[:45]:45s} {tag}: {n} bars")
+            sys.stdout.flush()
+
+            self._known_token_ids.add(token_id)
 
     def _get_latest_prices(self) -> Dict[str, float]:
         """Return the most recent known price for each token."""
@@ -286,6 +447,17 @@ class PaperTrader:
             print(f"    → Signal: {action_icon} | conf={signal.confidence:.0%} | "
                   f"{signal.reason}")
             sys.stdout.flush()
+
+            # Record for dashboard
+            self.latest_signals[token_id] = {
+                "slug":       market.slug,
+                "question":   market.question,
+                "price":      latest_bar.price,
+                "signal":     signal.action,
+                "reason":     signal.reason,
+                "confidence": signal.confidence,
+                "updated_at": latest_bar.timestamp.isoformat(),
+            }
 
             if signal.action == "HOLD":
                 continue
@@ -391,6 +563,98 @@ class PaperTrader:
 
         except Exception:
             return None
+
+    def _write_state(self) -> None:
+        """
+        Write the current session state to data/state.json.
+
+        The dashboard reads this file every few seconds to refresh the display.
+        We write atomically (temp file + rename) so the dashboard never reads
+        a half-written file.
+        """
+        now = datetime.utcnow()
+        elapsed = (now - self.session_start).total_seconds() / 60 if self.session_start else 0
+        remaining = max(0, (self.session_end - now).total_seconds() / 60) if self.session_end else 0
+
+        # Current prices from latest known bars
+        current_prices = self._get_latest_prices()
+
+        # Portfolio snapshot
+        total_val = self.portfolio.total_value(current_prices)
+        pct_return = (total_val - self.portfolio.starting_cash) / self.portfolio.starting_cash * 100
+
+        # Open positions
+        positions_list = []
+        for tid, pos in self.portfolio.positions.items():
+            cur_price  = current_prices.get(tid, pos.avg_cost)
+            unreal_pnl = (cur_price - pos.avg_cost) * pos.shares
+            positions_list.append({
+                "market_slug":   pos.market_slug,
+                "outcome":       pos.outcome,
+                "shares":        round(pos.shares, 4),
+                "avg_cost":      round(pos.avg_cost, 6),
+                "current_price": round(cur_price, 6),
+                "unrealised_pnl": round(unreal_pnl, 4),
+                "opened_at":     pos.opened_at.isoformat(),
+            })
+
+        # Recent trades (last 20)
+        trades_list = []
+        for t in self.portfolio.trade_log[-20:]:
+            trades_list.append({
+                "trade_id":   t.trade_id,
+                "market_slug": t.market_slug,
+                "action":     t.action,
+                "outcome":    t.outcome,
+                "shares":     round(t.shares, 4),
+                "price":      round(t.price, 6),
+                "total_cost": round(t.total_cost, 4),
+                "pnl":        round(t.pnl, 4),
+                "timestamp":  t.timestamp.isoformat(),
+            })
+
+        # Compute live metrics
+        import metrics as metrics_module
+        sell_trades = [t for t in self.portfolio.trade_log if t.action == "SELL"]
+        sharpe   = metrics_module.compute_sharpe_ratio(self.equity_curve)
+        max_dd   = metrics_module.compute_max_drawdown(self.equity_curve)
+        win_rate = metrics_module.compute_win_rate(self.portfolio.trade_log)
+
+        state = {
+            "updated_at":       now.isoformat(),
+            "tick":             self.tick_count,
+            "strategy":         self.strategy.name,
+            "duration_minutes": self.duration_minutes,
+            "elapsed_minutes":  round(elapsed, 1),
+            "remaining_minutes": round(remaining, 1),
+            "session_start":    self.session_start.isoformat() if self.session_start else None,
+            "session_end":      self.session_end.isoformat()   if self.session_end   else None,
+            "portfolio": {
+                "cash":          round(self.portfolio.cash, 4),
+                "total_value":   round(total_val, 4),
+                "starting_cash": self.portfolio.starting_cash,
+                "total_return_pct": round(pct_return, 4),
+                "open_positions": len(self.portfolio.positions),
+                "total_trades":  len(self.portfolio.trade_log),
+                "sell_trades":   len(sell_trades),
+            },
+            "metrics": {
+                "sharpe_ratio":    round(sharpe, 4),
+                "max_drawdown_pct": round(max_dd, 4),
+                "win_rate_pct":    round(win_rate, 4),
+            },
+            "equity_curve":  [round(v, 4) for v in self.equity_curve],
+            "positions":     positions_list,
+            "recent_trades": list(reversed(trades_list)),
+            "market_signals": list(self.latest_signals.values()),
+        }
+
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp_path   = os.path.join(DATA_DIR, "state.json.tmp")
+        state_path = os.path.join(DATA_DIR, "state.json")
+        with open(tmp_path, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, state_path)
 
     def _close_all_positions(self, final_prices: Dict[str, float]) -> None:
         """Liquidate all remaining positions at end of session."""

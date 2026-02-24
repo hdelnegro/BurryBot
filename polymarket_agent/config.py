@@ -106,6 +106,16 @@ PAPER_POLL_INTERVAL_SECONDS = 300   # 300 seconds = 5 minutes
 # Default session duration in minutes (used if --duration not specified)
 PAPER_DEFAULT_DURATION_MINUTES = 60
 
+# How many ticks between full market-list refreshes.
+# Short-lived markets (BTC up/down hourly) expire and new ones open during a long
+# session, so we periodically re-fetch the top-volume market list and add newcomers.
+# 12 ticks × 5 min = refresh every 60 minutes.
+MARKET_REFRESH_INTERVAL_TICKS = 12
+
+# Hard cap on how many markets to watch simultaneously.
+# Keeps each tick from taking too long to poll.
+MAX_WATCHED_MARKETS = 50
+
 # ---------------------------------------------------------------------------
 # Phase flags
 # ---------------------------------------------------------------------------

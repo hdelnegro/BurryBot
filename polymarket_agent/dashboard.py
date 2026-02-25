@@ -318,6 +318,7 @@ function timeLabel(iso) {
 const STALE_SECONDS = 360;  // same threshold as status.py
 let isLive = false;
 let heartbeat = 0;
+let lastSuccessfulFetch = 0;  // epoch ms of last successful /api/state response
 
 function setLiveStatus(live) {
   isLive = live;
@@ -328,6 +329,10 @@ function setLiveStatus(live) {
 }
 
 setInterval(() => {
+  // Mark stale if the API hasn't responded successfully for STALE_SECONDS
+  if (lastSuccessfulFetch > 0 && (Date.now() - lastSuccessfulFetch) / 1000 >= STALE_SECONDS) {
+    setLiveStatus(false);
+  }
   if (!isLive) return;
   heartbeat++;
   const hbEl = document.getElementById('hb-count');
@@ -340,9 +345,9 @@ async function refresh() {
   let data;
   try {
     const res = await fetch('/api/state?t=' + Date.now(), { cache: 'no-store' });
-    if (!res.ok) { scheduleNext(); return; }
+    if (!res.ok) { setLiveStatus(false); scheduleNext(); return; }
     data = await res.json();
-  } catch { scheduleNext(); return; }
+  } catch { setLiveStatus(false); scheduleNext(); return; }
 
   // Step 2: update DOM — wrapped so any bug shows visibly on the page
   try {
@@ -433,6 +438,8 @@ async function refresh() {
       trBody.innerHTML = '<tr><td colspan="5" class="no-data">no trades yet</td></tr>';
     }
 
+    lastSuccessfulFetch = Date.now();
+
     // Live status: check updated_at age against stale threshold
     try {
       const updStr = String(data.updated_at || '').replace(/(\.\d{3})\d+/, '$1');
@@ -445,6 +452,7 @@ async function refresh() {
       'tick ' + data.tick + ' · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
   } catch (e) {
+    setLiveStatus(false);
     showError(e.message);
   }
 

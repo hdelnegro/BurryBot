@@ -13,6 +13,7 @@ Or standalone (if trader is already running in another terminal):
 """
 
 import json
+import logging
 import os
 import threading
 
@@ -22,7 +23,20 @@ from config import DATA_DIR
 
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
 
+LOGS_DIR    = "logs"
+ACCESS_LOG  = os.path.join(LOGS_DIR, "dashboard_access.log")
+
 app = Flask(__name__)
+
+
+def _redirect_werkzeug_to_file() -> None:
+    """Send Werkzeug HTTP access logs to logs/dashboard_access.log instead of stdout."""
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    handler = logging.FileHandler(ACCESS_LOG)
+    handler.setLevel(logging.INFO)
+    logger = logging.getLogger("werkzeug")
+    logger.setLevel(logging.INFO)
+    logger.handlers = [handler]  # replace stdout handler with file handler
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +318,7 @@ function timeLabel(iso) {
 const STALE_SECONDS = 360;  // same threshold as status.py
 let isLive = false;
 let heartbeat = 0;
+let lastSuccessfulFetch = 0;  // epoch ms of last successful /api/state response
 
 function setLiveStatus(live) {
   isLive = live;
@@ -314,6 +329,10 @@ function setLiveStatus(live) {
 }
 
 setInterval(() => {
+  // Mark stale if the API hasn't responded successfully for STALE_SECONDS
+  if (lastSuccessfulFetch > 0 && (Date.now() - lastSuccessfulFetch) / 1000 >= STALE_SECONDS) {
+    setLiveStatus(false);
+  }
   if (!isLive) return;
   heartbeat++;
   const hbEl = document.getElementById('hb-count');
@@ -326,9 +345,9 @@ async function refresh() {
   let data;
   try {
     const res = await fetch('/api/state?t=' + Date.now(), { cache: 'no-store' });
-    if (!res.ok) { scheduleNext(); return; }
+    if (!res.ok) { setLiveStatus(false); scheduleNext(); return; }
     data = await res.json();
-  } catch { scheduleNext(); return; }
+  } catch { setLiveStatus(false); scheduleNext(); return; }
 
   // Step 2: update DOM — wrapped so any bug shows visibly on the page
   try {
@@ -419,6 +438,8 @@ async function refresh() {
       trBody.innerHTML = '<tr><td colspan="5" class="no-data">no trades yet</td></tr>';
     }
 
+    lastSuccessfulFetch = Date.now();
+
     // Live status: check updated_at age against stale threshold
     try {
       const updStr = String(data.updated_at || '').replace(/(\.\d{3})\d+/, '$1');
@@ -431,6 +452,7 @@ async function refresh() {
       'tick ' + data.tick + ' · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
   } catch (e) {
+    setLiveStatus(false);
     showError(e.message);
   }
 
@@ -466,6 +488,7 @@ def start_in_thread(host: str = "127.0.0.1", port: int = 5000) -> None:
     no need to manually shut it down.
     """
     def _run():
+        _redirect_werkzeug_to_file()
         # use_reloader=False is required when running inside a thread
         app.run(host=host, port=port, use_reloader=False, threaded=True)
 
@@ -479,4 +502,5 @@ if __name__ == "__main__":
     # Allow running standalone: python dashboard.py
     print("Starting dashboard server (standalone mode)...")
     print("Make sure the paper trader is running in another terminal.")
+    _redirect_werkzeug_to_file()
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)

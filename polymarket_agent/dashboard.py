@@ -13,6 +13,7 @@ Or standalone (if trader is already running in another terminal):
 """
 
 import json
+import logging
 import os
 import threading
 
@@ -22,7 +23,20 @@ from config import DATA_DIR
 
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
 
+LOGS_DIR    = "logs"
+ACCESS_LOG  = os.path.join(LOGS_DIR, "dashboard_access.log")
+
 app = Flask(__name__)
+
+
+def _redirect_werkzeug_to_file() -> None:
+    """Send Werkzeug HTTP access logs to logs/dashboard_access.log instead of stdout."""
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    handler = logging.FileHandler(ACCESS_LOG)
+    handler.setLevel(logging.INFO)
+    logger = logging.getLogger("werkzeug")
+    logger.setLevel(logging.INFO)
+    logger.handlers = [handler]  # replace stdout handler with file handler
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +480,7 @@ def start_in_thread(host: str = "127.0.0.1", port: int = 5000) -> None:
     no need to manually shut it down.
     """
     def _run():
+        _redirect_werkzeug_to_file()
         # use_reloader=False is required when running inside a thread
         app.run(host=host, port=port, use_reloader=False, threaded=True)
 
@@ -479,4 +494,5 @@ if __name__ == "__main__":
     # Allow running standalone: python dashboard.py
     print("Starting dashboard server (standalone mode)...")
     print("Make sure the paper trader is running in another terminal.")
+    _redirect_werkzeug_to_file()
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)

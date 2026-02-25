@@ -164,7 +164,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
 <div id="session-ended-banner">⚠ Trader session ended — data is frozen</div>
 <header>
-  <h1>⚡ BurryBot — Paper Trading Dashboard</h1>
+  <div>
+    <h1>⚡ BurryBot — Paper Trading Dashboard</h1>
+    <div id="header-meta" style="font-size:10px;color:var(--muted);margin-top:3px;">connecting…</div>
+  </div>
   <div id="status-pill">
     <span id="last-update">connecting…</span>
     <span style="color:var(--border);margin:0 4px;">|</span>
@@ -228,8 +231,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="panel" style="overflow:auto;">
       <h2>Open Positions</h2>
       <table>
-        <thead><tr><th>Market</th><th>Shares</th><th>Avg $</th><th>Now $</th><th>PnL</th></tr></thead>
-        <tbody id="positions-body"><tr><td colspan="5" class="no-data">no open positions</td></tr></tbody>
+        <thead><tr><th>Market</th><th>Shares</th><th>Avg $</th><th>Now $</th><th>PnL</th><th>% Portf</th></tr></thead>
+        <tbody id="positions-body"><tr><td colspan="6" class="no-data">no open positions</td></tr></tbody>
       </table>
     </div>
     <div class="panel" style="overflow:auto;">
@@ -422,19 +425,24 @@ async function refresh() {
     }
 
     // Open positions
-    const posBody = document.getElementById('positions-body');
+    const posBody    = document.getElementById('positions-body');
+    const totalValue = parseFloat(data.portfolio?.total_value) || 1;
     if (data.positions && data.positions.length) {
-      posBody.innerHTML = data.positions.map(pos => `
-        <tr>
+      posBody.innerHTML = data.positions.map(pos => {
+        const posValue = parseFloat(pos.shares) * parseFloat(pos.current_price);
+        const pct      = (posValue / totalValue * 100).toFixed(1) + '%';
+        return `<tr>
           <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
               title="${pos.market_slug || ''}">${(pos.market_slug || '').replace(/-/g,' ')}</td>
           <td>${parseFloat(pos.shares).toFixed(0)}</td>
           <td>${parseFloat(pos.avg_cost).toFixed(4)}</td>
           <td>${parseFloat(pos.current_price).toFixed(4)}</td>
           <td class="${colorClass(pos.unrealised_pnl)}">${parseFloat(pos.unrealised_pnl) >= 0 ? '+' : ''}${parseFloat(pos.unrealised_pnl).toFixed(2)}</td>
-        </tr>`).join('');
+          <td style="color:var(--muted)">${pct}</td>
+        </tr>`;
+      }).join('');
     } else {
-      posBody.innerHTML = '<tr><td colspan="5" class="no-data">no open positions</td></tr>';
+      posBody.innerHTML = '<tr><td colspan="6" class="no-data">no open positions</td></tr>';
     }
 
     // Recent trades
@@ -454,6 +462,13 @@ async function refresh() {
     }
 
     lastSuccessfulFetch = Date.now();
+
+    // Header meta: strategy + session start
+    const metaEl = document.getElementById('header-meta');
+    if (metaEl && data.strategy) {
+      const startStr = data.session_start ? timeLabel(data.session_start) : '—';
+      metaEl.textContent = data.strategy + '  ·  started ' + startStr;
+    }
 
     // Live status: check updated_at age against stale threshold
     try {

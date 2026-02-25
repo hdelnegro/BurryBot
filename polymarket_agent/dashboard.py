@@ -76,7 +76,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 5px 12px; border-radius: 20px; font-size: 11px; color: var(--muted);
     }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green);
-           animation: pulse 2s infinite; }
+           animation: pulse 2s infinite; flex-shrink: 0; }
+    .dot-dead { background: var(--red) !important; animation: none !important; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 
     main { padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
@@ -142,10 +143,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <header>
   <h1>⚡ BurryBot — Paper Trading Dashboard</h1>
   <div id="status-pill">
-    <span class="dot"></span>
     <span id="last-update">connecting…</span>
     <span style="color:var(--border);margin:0 4px;">|</span>
-    <span style="color:var(--muted);font-size:10px;">hb:<span id="hb-count">0</span></span>
+    <span style="display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);"><span class="dot" id="live-dot"></span>hb:<span id="hb-count">0</span></span>
   </div>
 </header>
 
@@ -248,6 +248,7 @@ try {
         backgroundColor: 'rgba(102,126,234,0.12)',
         borderWidth: 2,
         pointRadius: 0,          // no dots — faster with many data points
+        pointHoverRadius: 4,     // dot appears on hover
         tension: 0.3,
         fill: true,
       }]
@@ -256,7 +257,11 @@ try {
       responsive: true,
       maintainAspectRatio: false,
       animation: { duration: 0 },  // instant updates, no transition delay
-      plugins: { legend: { display: false } },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => '$' + ctx.parsed.y.toFixed(2) } },
+      },
       scales: {
         x: { ticks: { color: '#718096', font: { size: 10 } }, grid: { color: '#1e2130' } },
         y: {
@@ -295,9 +300,21 @@ function timeLabel(iso) {
   } catch { return String(iso); }
 }
 
-// ─── Heartbeat counter (ticks up every second regardless of fetch result) ────
+// ─── Live status + heartbeat ─────────────────────────────────────────────────
+const STALE_SECONDS = 360;  // same threshold as status.py
+let isLive = false;
 let heartbeat = 0;
+
+function setLiveStatus(live) {
+  isLive = live;
+  const dot = document.getElementById('live-dot');
+  if (!dot) return;
+  if (live) { dot.classList.remove('dot-dead'); }
+  else       { dot.classList.add('dot-dead'); }
+}
+
 setInterval(() => {
+  if (!isLive) return;
   heartbeat++;
   const hbEl = document.getElementById('hb-count');
   if (hbEl) hbEl.textContent = heartbeat;
@@ -401,6 +418,13 @@ async function refresh() {
     } else {
       trBody.innerHTML = '<tr><td colspan="5" class="no-data">no trades yet</td></tr>';
     }
+
+    // Live status: check updated_at age against stale threshold
+    try {
+      const updStr = String(data.updated_at || '').replace(/(\.\d{3})\d+/, '$1');
+      const updAt  = new Date(updStr.endsWith('Z') ? updStr : updStr + 'Z');
+      setLiveStatus((Date.now() - updAt.getTime()) / 1000 < STALE_SECONDS);
+    } catch { setLiveStatus(false); }
 
     // Status pill — use browser's local time (avoids issues with server timestamp format)
     document.getElementById('last-update').textContent =

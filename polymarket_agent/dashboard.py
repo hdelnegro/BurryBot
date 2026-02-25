@@ -151,9 +151,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     /* Progress bar for time remaining */
     .progress-wrap { background: var(--bg); border-radius: 4px; height: 5px; margin-top: 8px; overflow: hidden; }
     .progress-bar  { height: 100%; background: var(--accent); border-radius: 4px; transition: width .5s; }
+
+    /* Session ended banner */
+    #session-ended-banner {
+      display: none;
+      background: rgba(252,129,129,.12); border-bottom: 1px solid rgba(252,129,129,.4);
+      color: var(--red); padding: 8px 24px; font-size: 12px; text-align: center;
+      letter-spacing: .4px;
+    }
   </style>
 </head>
 <body>
+<div id="session-ended-banner">⚠ Trader session ended — data is frozen</div>
 <header>
   <h1>⚡ BurryBot — Paper Trading Dashboard</h1>
   <div id="status-pill">
@@ -321,11 +330,17 @@ let heartbeat = 0;
 let lastSuccessfulFetch = 0;  // epoch ms of last successful /api/state response
 
 function setLiveStatus(live) {
+  if (isLive === live) return;  // no change — skip DOM update
   isLive = live;
-  const dot = document.getElementById('live-dot');
-  if (!dot) return;
-  if (live) { dot.classList.remove('dot-dead'); }
-  else       { dot.classList.add('dot-dead'); }
+  const dot    = document.getElementById('live-dot');
+  const banner = document.getElementById('session-ended-banner');
+  if (live) {
+    dot?.classList.remove('dot-dead');
+    if (banner) banner.style.display = 'none';
+  } else {
+    dot?.classList.add('dot-dead');
+    if (banner) banner.style.display = 'block';
+  }
 }
 
 setInterval(() => {
@@ -495,7 +510,7 @@ def start_in_thread(host: str = "127.0.0.1", port: int = 5000) -> None:
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     print(f"\nDashboard running at → http://{host}:{port}")
-    print("Open that URL in your browser. It refreshes every 10 seconds.\n")
+    print("Open that URL in your browser. It refreshes every second.\n")
 
 
 if __name__ == "__main__":

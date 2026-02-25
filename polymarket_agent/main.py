@@ -46,6 +46,7 @@ import metrics as metrics_module
 from strategies.momentum import MomentumStrategy
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.random_baseline import RandomBaselineStrategy
+from strategies.rsi import RSIStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ STRATEGY_MAP = {
     "momentum":        MomentumStrategy,
     "mean_reversion":  MeanReversionStrategy,
     "random_baseline": RandomBaselineStrategy,
+    "rsi":             RSIStrategy,
 }
 
 
@@ -81,6 +83,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Which strategy to run:\n"
             "  momentum        — Buy on uptrends, sell on downtrends\n"
             "  mean_reversion  — Buy when price is abnormally low (Z-score)\n"
+            "  rsi             — Buy when RSI < 30 (oversold), sell when RSI > 70 (overbought)\n"
             "  random_baseline — Random trades (performance floor benchmark)"
         ),
     )
@@ -250,9 +253,10 @@ def interactive_setup() -> argparse.Namespace:
     # ── Strategy ─────────────────────────────────────────────────────────────
 
     strategy = pick("Strategy:", [
-        ("momentum",        "Buy on uptrends, sell on downtrends",          "momentum"),
-        ("mean_reversion",  "Buy when price drops below Z-score threshold", "mean_reversion"),
-        ("random_baseline", "Random trades — performance floor benchmark",  "random_baseline"),
+        ("momentum",        "Buy on uptrends, sell on downtrends",             "momentum"),
+        ("mean_reversion",  "Buy when price drops below Z-score threshold",    "mean_reversion"),
+        ("rsi",             "Buy when RSI<30 (oversold), sell when RSI>70",    "rsi"),
+        ("random_baseline", "Random trades — performance floor benchmark",     "random_baseline"),
     ])
 
     # ── Mode ─────────────────────────────────────────────────────────────────

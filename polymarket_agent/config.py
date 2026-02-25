@@ -81,6 +81,11 @@ MEAN_REVERSION_Z_THRESHOLD = 1.5
 # Mean-reversion strategy: number of bars used to compute the rolling mean
 MEAN_REVERSION_WINDOW = 20
 
+# RSI strategy settings
+RSI_PERIOD      = 14    # Number of bars used to compute RSI (standard = 14)
+RSI_OVERSOLD    = 30.0  # RSI below this → price fell too fast → BUY signal
+RSI_OVERBOUGHT  = 70.0  # RSI above this → price rose too fast → SELL signal
+
 # Minimum price to consider trading (avoids near-zero junk markets)
 MIN_TRADEABLE_PRICE = 0.01
 

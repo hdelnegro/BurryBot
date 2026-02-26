@@ -487,7 +487,7 @@ function timeLabel(iso) {
 
 // ─── Live status + heartbeat ─────────────────────────────────────────────────
 const STALE_SECONDS = 360;
-let isLive = false;
+let isLive = true;  // matches the dot's initial green DOM state; first setLiveStatus(false) will fire correctly
 let heartbeat = 0;
 let lastSuccessfulFetch = 0;
 

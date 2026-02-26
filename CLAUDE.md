@@ -19,17 +19,23 @@ python main.py --strategy random_baseline --no-fetch   # use cached data only
 python main.py --strategy momentum --mode paper --duration 60
 python main.py --strategy mean_reversion --mode paper --markets 10 --duration 120
 
+# Paper trading with a custom instance name (defaults to <strategy>_<HHMM>)
+python main.py --strategy momentum --mode paper --duration 60 --name run1
+python main.py --strategy rsi --mode paper --duration 120 --name run2
+
 # Paper trading with live web dashboard (http://localhost:5000)
+# Overview page shows all running instances; click a card for the full detail view
 python main.py --strategy momentum --mode paper --duration 60 --dashboard
 
-# Check status of a running paper trading session (no venv needed)
-python status.py
-
-# Run the dashboard standalone (trader running in separate terminal)
+# Run the dashboard standalone (one or more traders running in separate terminals)
 python dashboard.py
+
+# Check status of a running paper trading session (no venv needed)
+# Note: reads state_default.json or the most recently modified state_*.json
+python status.py
 ```
 
-Available strategies: `momentum`, `mean_reversion`, `random_baseline`
+Available strategies: `momentum`, `mean_reversion`, `rsi`, `random_baseline`
 
 ## Architecture Overview
 
@@ -37,7 +43,7 @@ The system is a Polymarket prediction-market trading simulator with two executio
 
 **Backtest mode**: Fetches historical price data from the Polymarket CLOB API, caches it as CSVs in `data/`, then replays bar-by-bar through `BacktestEngine`.
 
-**Paper trading mode**: Polls live Polymarket prices every 5 minutes (configurable), runs the strategy in real-time, executes simulated trades. After every tick it writes `data/state.json` for the dashboard and status tool.
+**Paper trading mode**: Polls live Polymarket prices every 5 minutes (configurable), runs the strategy in real-time, executes simulated trades. After every tick it writes `data/state_<name>.json` (where `<name>` is the instance name) for the dashboard and status tool. Multiple instances can run simultaneously, each with its own state file.
 
 ### Data Flow
 
@@ -52,7 +58,7 @@ main.py → BacktestEngine / PaperTrader → strategy.generate_signal()
                                           ↓
                               metrics.compute_all_metrics()
                                           ↓
-                              data/state.json  ←→  dashboard.py / status.py
+                              data/state_<name>.json  ←→  dashboard.py / status.py
 ```
 
 ### Key Files
@@ -62,11 +68,11 @@ main.py → BacktestEngine / PaperTrader → strategy.generate_signal()
 | `config.py` | All constants — API URLs, thresholds, defaults. Change behavior here, not in logic files. |
 | `models.py` | Dataclasses: `Market`, `PriceBar`, `Signal`, `Position`, `Trade` |
 | `strategy_base.py` | Abstract base class all strategies must inherit |
-| `strategies/` | `momentum.py`, `mean_reversion.py`, `random_baseline.py` |
+| `strategies/` | `momentum.py`, `mean_reversion.py`, `rsi.py`, `random_baseline.py` |
 | `backtest_engine.py` | Bar-by-bar simulation loop; prevents lookahead bias by passing `history[:i]` to strategy |
-| `paper_trader.py` | Live polling loop; dynamic market refresh; writes `data/state.json` after each tick |
-| `dashboard.py` | Flask web dashboard (daemon thread); reads `data/state.json`; served at `localhost:5000` |
-| `status.py` | CLI snapshot of running session; reads `data/state.json`; no venv needed |
+| `paper_trader.py` | Live polling loop; dynamic market refresh; writes `data/state_<name>.json` after each tick |
+| `dashboard.py` | Flask web dashboard; overview at `/`, per-instance detail at `/instance/<name>`; served at `localhost:5000` |
+| `status.py` | CLI snapshot of running session; reads most recent `data/state_*.json`; no venv needed |
 | `portfolio.py` | Tracks cash, positions, trade log; executes buys/sells |
 | `risk_manager.py` | Gates every signal; enforces position size and exposure limits |
 | `metrics.py` | Computes final performance stats (total return, Sharpe, win rate, etc.) |
@@ -82,7 +88,13 @@ The paper trader refreshes its market watchlist every `MARKET_REFRESH_INTERVAL_T
 
 ### Dashboard / State File
 
-`paper_trader._write_state()` writes `data/state.json` atomically (via `.tmp` + `os.replace`) after every tick. `dashboard.py` polls `/api/state` every second from the browser. `status.py` reads the same file directly and treats state older than 6 minutes as stale (session ended or crashed).
+`paper_trader._write_state()` writes `data/state_<name>.json` atomically (via `.tmp` + `os.replace`) after every tick, where `<name>` is the instance name (defaults to `<strategy>_<HHMM>` if `--name` is not passed).
+
+`dashboard.py` serves two views:
+- **Overview** (`/`) — polls `/api/instances` every 2 seconds; shows all `state_*.json` files as clickable cards with mini sparklines
+- **Detail** (`/instance/<name>`) — polls `/api/state/<name>` every second; full single-instance view with equity curve, signals, positions, and trades
+
+`status.py` reads the most recent `state_*.json` directly and treats state older than 6 minutes as stale.
 
 ### Adding a New Strategy
 

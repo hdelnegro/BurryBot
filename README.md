@@ -42,19 +42,29 @@ python main.py --strategy random_baseline --no-fetch
 # Run a live paper trading session for 60 minutes
 python main.py --strategy momentum --mode paper --duration 60
 
+# Run with a custom instance name (auto-generates <strategy>_<HHMM> if omitted)
+python main.py --strategy momentum --mode paper --duration 60 --name run1
+
+# Run multiple instances simultaneously (each writes its own state file)
+python main.py --strategy momentum --mode paper --duration 60 --name run1
+python main.py --strategy mean_reversion --mode paper --duration 60 --name run2
+
 # Run paper trading with the live web dashboard
+# Overview at http://localhost:5000 shows all instances; click a card for the detail view
 python main.py --strategy momentum --mode paper --duration 60 --dashboard
+
+# Run the dashboard standalone (one or more traders running in separate terminals)
+python dashboard.py
 
 # Check the status of a running paper trading session (in another terminal)
 python status.py
-
-# Run the dashboard standalone (if trader is running in a separate terminal)
-python dashboard.py
 ```
 
-Available strategies: `momentum`, `mean_reversion`, `random_baseline`
+Available strategies: `momentum`, `mean_reversion`, `rsi`, `random_baseline`
 
 All configuration (API URLs, position sizing limits, strategy parameters) lives in `config.py`.
+
+For an explanation of the performance metrics (Sharpe ratio, max drawdown, win rate) and strategy concepts (momentum, mean reversion, RSI), see [docs/trading_concepts.md](docs/trading_concepts.md).
 
 ---
 
@@ -109,10 +119,10 @@ Polymarket APIs
                 │           ▼
                 │    metrics.compute_all_metrics() ←— evaluates final performance
                 │
-                └──► data/state.json  ←— written after every tick
+                └──► data/state_<name>.json  ←— written after every tick (one file per instance)
                            │
                            ▼
-                     dashboard.py     ←— Flask server polling state.json (--dashboard flag)
+                     dashboard.py     ←— Flask server; overview of all instances + per-instance detail
                      status.py        ←— CLI snapshot reader (python status.py)
 ```
 
@@ -186,7 +196,7 @@ At the end of the simulation, all remaining open positions are force-closed at t
 
 On startup, fetches a list of active markets (only open markets — backtesting can use resolved markets but paper trading should only trade things still being decided). Then loads historical price bars to give the strategy enough context to generate signals from the first tick.
 
-The main loop polls every 5 minutes (configurable as `PAPER_POLL_INTERVAL_SECONDS`). At each tick it fetches the latest price bar for each market, appends it to the in-memory price history, runs the strategy, checks the risk manager, and simulates any approved trades. After every tick it writes the full session state to `data/state.json` for the dashboard and status tool to read.
+The main loop polls every 5 minutes (configurable as `PAPER_POLL_INTERVAL_SECONDS`). At each tick it fetches the latest price bar for each market, appends it to the in-memory price history, runs the strategy, checks the risk manager, and simulates any approved trades. After every tick it writes the full session state to `data/state_<name>.json` (where `<name>` is the instance name, defaulting to `<strategy>_<HHMM>`) for the dashboard and status tool to read. Multiple instances can run simultaneously, each writing its own file.
 
 **Dynamic market refresh**: Every `MARKET_REFRESH_INTERVAL_TICKS` ticks (default: every 12 ticks = 60 minutes), the trader re-fetches the top-volume active market list. This is necessary because Polymarket has short-lived markets — for example, "Bitcoin Up or Down - 2PM ET" opens and resolves every hour. Without periodic refreshes, a long-running session would end up watching only expired markets. The refresh detects newly listed markets (adds them and loads their history), and detects expired or resolved markets (removes them from the watchlist and force-closes any open positions). A set of `_known_token_ids` prevents re-downloading history for markets already seen, and `_expired_token_ids` prevents re-adding markets that have already been removed.
 
@@ -212,6 +222,10 @@ Computes a rolling mean and standard deviation over a window of recent bars. Cal
 
 Mean reversion is the philosophical opposite of momentum. It works when markets overreact to short-term news and prices temporarily deviate from their fair value. The Z-score threshold of ±1.5 (default) means a signal fires when the price is in roughly the bottom or top 7% of its recent distribution — unusual enough to suggest a temporary mispricing.
 
+### `strategies/rsi.py`
+
+Computes the Relative Strength Index (RSI) over a rolling window. RSI measures the speed and magnitude of recent price changes on a 0–100 scale. When RSI drops below 30, the market is considered oversold and a BUY is signalled; when it rises above 70, the market is considered overbought and a SELL is signalled. This is a classic momentum-reversal hybrid — it captures overextension in either direction rather than betting on continued trends.
+
 ### `strategies/random_baseline.py`
 
 Makes random BUY/SELL/HOLD decisions. Serves only as a benchmark: any real strategy should outperform random trading over a sufficient backtest period. If it doesn't, the strategy has no edge.
@@ -228,23 +242,26 @@ The only component that can block a trade. Checks position size limits, total ex
 
 ### `dashboard.py` — Live web dashboard
 
-A Flask application that serves a browser dashboard at `http://localhost:5000`. It is started via the `--dashboard` flag and runs in a background daemon thread alongside the paper trader — no separate process is needed, and it shuts down automatically when the trader exits.
+A Flask application that serves a browser dashboard at `http://localhost:5000`. It is started via the `--dashboard` flag and runs in a background daemon thread alongside the paper trader — no separate process is needed, and it shuts down automatically when the trader exits. It can also run standalone (`python dashboard.py`) if one or more traders are running in separate terminals.
 
-The dashboard is a single self-contained HTML/JS page (embedded directly in the Python file as a string). It polls `/api/state` every second and updates the display without reloading the page. The page shows:
+The dashboard has two views:
 
+**Overview page** (`/`) — polls `/api/instances` every 2 seconds and renders a card grid showing all active and recently completed instances. Each card displays the instance name, strategy, portfolio value, return %, a mini sparkline of the equity curve, and trade/win-rate stats. Live instances show a pulsing green dot; dead ones turn red and dimmed. Clicking any card navigates to the detail view.
+
+**Detail page** (`/instance/<name>`) — polls `/api/state/<name>` every second and shows the full single-instance dashboard:
 - **KPI cards**: portfolio value, total return %, Sharpe ratio, max drawdown, win rate, time remaining with a progress bar
 - **Equity curve**: a Chart.js line chart updating in real time
 - **Market signals**: the latest signal for each watched market (BUY / SELL / HOLD with reason)
 - **Open positions**: each holding with unrealised PnL
 - **Recent trades**: last 20 trades with action, price, and PnL
 
-The `/api/state` endpoint reads `data/state.json` — a file the paper trader writes atomically (write to a `.tmp` file then `os.replace`) after every tick. The atomic write ensures the dashboard never reads a half-written file. HTTP caching headers (`Cache-Control: no-store`) are set on every response to prevent the browser or any proxy from serving stale state.
+A `← Overview` back button appears at the top of every detail page.
 
-The dashboard can also be run standalone (`python dashboard.py`) if the paper trader is running in another terminal, since both read from the same `data/state.json`.
+Each paper trader instance writes to its own `data/state_<name>.json` atomically (via a `.tmp` + `os.replace`) after every tick. The atomic write ensures the dashboard never reads a half-written file. HTTP caching headers (`Cache-Control: no-store`) are set on every response.
 
 ### `status.py` — Terminal status snapshot
 
-A lightweight CLI tool that reads `data/state.json` and prints a colour-coded summary of the current paper trading session. Unlike the dashboard it has zero dependencies beyond the Python standard library — no venv activation needed.
+A lightweight CLI tool that reads the most recently modified `data/state_*.json` and prints a colour-coded summary of the current paper trading session. Unlike the dashboard it has zero dependencies beyond the Python standard library — no venv activation needed.
 
 It detects a stale state file (older than 6 minutes, which is one missed poll interval plus a grace period) and reports "No agent running" rather than displaying outdated numbers. The output includes strategy name, tick count, time remaining, portfolio value and return, Sharpe/drawdown/win-rate metrics, all open positions with unrealised PnL, the five most recent trades, and a count of BUY/SELL/HOLD signals from the last tick.
 

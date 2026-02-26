@@ -19,8 +19,10 @@ Run  python main.py        (no arguments) for interactive setup.
 """
 
 import argparse
+import re
 import sys
 import os
+import time
 
 # Make sure Python can find our modules (they're in the same directory)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -136,7 +138,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="[paper mode only] Start a live web dashboard at http://localhost:5000",
     )
 
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help=(
+            "[paper mode only] Instance name for this run (letters, digits, underscores, hyphens).\n"
+            "Defaults to <strategy>_<HHMM> if not provided."
+        ),
+    )
+
     return parser
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _sanitize_name(name: str) -> str:
+    """Keep only letters, digits, underscores, hyphens. Truncate to 40 chars."""
+    clean = re.sub(r"[^a-zA-Z0-9_-]", "", name)
+    return clean[:40] or "default"
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +381,7 @@ def interactive_setup() -> argparse.Namespace:
         duration  = duration,
         dashboard = dashboard,
         no_fetch  = no_fetch,
+        name      = None,
     )
 
 
@@ -398,8 +421,18 @@ def main():
     # PAPER TRADING MODE
     # ----------------------------------------------------------------
     if args.mode == "paper":
+        # Determine instance name
+        instance_name = (
+            _sanitize_name(args.name)
+            if args.name
+            else f"{args.strategy}_{time.strftime('%H%M')}"
+        )
+
         if args.dashboard:
-            start_dashboard(host="127.0.0.1", port=5000)
+            try:
+                start_dashboard(host="127.0.0.1", port=5000)
+            except OSError:
+                print("Dashboard already running at http://localhost:5000")
 
         trader = PaperTrader(
             strategy         = strategy,
@@ -407,6 +440,7 @@ def main():
             risk_manager     = risk_manager,
             num_markets      = args.markets,
             duration_minutes = args.duration,
+            instance_name    = instance_name,
         )
         results = trader.run()
 

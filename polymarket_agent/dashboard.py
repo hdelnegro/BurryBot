@@ -1,30 +1,34 @@
 """
-dashboard.py — Live web dashboard for the paper trading session.
+dashboard.py — Live web dashboard for paper trading sessions.
 
-Serves a browser dashboard at http://localhost:5000
-The page auto-refreshes every 1 second by polling /api/state,
-which reads data/state.json written by the paper trader after every tick.
+Serves a browser dashboard at http://localhost:5000.
+
+Overview page (/) shows all running/recent instances as cards.
+Detail page (/instance/<name>) shows the full single-instance view.
 
 Start automatically via:
   python main.py --strategy momentum --mode paper --duration 60 --dashboard
 
-Or standalone (if trader is already running in another terminal):
+Or standalone (if traders are already running in other terminals):
   python dashboard.py
 """
 
+import glob
 import json
 import logging
 import os
+import re
 import threading
+import time
 
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify, Response, abort
 
 from config import DATA_DIR
 
-STATE_FILE = os.path.join(DATA_DIR, "state.json")
+LOGS_DIR   = "logs"
+ACCESS_LOG = os.path.join(LOGS_DIR, "dashboard_access.log")
 
-LOGS_DIR    = "logs"
-ACCESS_LOG  = os.path.join(LOGS_DIR, "dashboard_access.log")
+STALE_SECONDS = 360  # same threshold as status.py
 
 app = Flask(__name__)
 
@@ -36,30 +40,166 @@ def _redirect_werkzeug_to_file() -> None:
     handler.setLevel(logging.INFO)
     logger = logging.getLogger("werkzeug")
     logger.setLevel(logging.INFO)
-    logger.handlers = [handler]  # replace stdout handler with file handler
+    logger.handlers = [handler]
 
 
 # ---------------------------------------------------------------------------
-# API endpoint — returns raw state JSON
+# Helpers
 # ---------------------------------------------------------------------------
 
-@app.route("/api/state")
-def api_state():
-    if not os.path.exists(STATE_FILE):
-        resp = jsonify({"error": "No state file yet — paper trader hasn't started a tick"})
-    else:
-        with open(STATE_FILE) as f:
-            data = json.load(f)
-        resp = jsonify(data)
-    # Prevent the browser and any proxy from caching this response
+def _no_cache(resp):
+    """Apply standard cache-busting headers to a Flask response."""
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     resp.headers["Pragma"]        = "no-cache"
     resp.headers["Expires"]       = "0"
     return resp
 
 
+def _get_all_state_files():
+    """
+    Glob data/state_*.json and return list of (name, path) sorted by mtime desc.
+    """
+    pattern = os.path.join(DATA_DIR, "state_*.json")
+    paths   = glob.glob(pattern)
+    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    results = []
+    for path in paths:
+        basename = os.path.basename(path)          # state_foo.json
+        name     = basename[len("state_"):-len(".json")]   # foo
+        results.append((name, path))
+    return results
+
+
+def _load_state(name: str):
+    """
+    Read data/state_<name>.json.
+
+    Returns (data_dict, is_live) where is_live is True if updated_at is recent.
+    Returns (None, False) if file doesn't exist or is unreadable.
+    """
+    path = os.path.join(DATA_DIR, f"state_{name}.json")
+    if not os.path.exists(path):
+        return None, False
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except Exception:
+        return None, False
+
+    is_live = False
+    try:
+        from datetime import datetime, timezone
+        upd_str = str(data.get("updated_at", ""))
+        upd_str = re.sub(r"(\.\d{3})\d+", r"\1", upd_str)
+        if not upd_str.endswith("Z"):
+            upd_str += "Z"
+        upd_at  = datetime.fromisoformat(upd_str.replace("Z", "+00:00"))
+        age     = (datetime.now(timezone.utc) - upd_at).total_seconds()
+        is_live = age < STALE_SECONDS
+    except Exception:
+        pass
+
+    return data, is_live
+
+
+def _downsample(curve, n=50):
+    """Return at most n evenly-spaced values from curve (for sparklines)."""
+    if len(curve) <= n:
+        return curve
+    step = len(curve) / n
+    return [curve[int(i * step)] for i in range(n)]
+
+
+def _valid_name(name: str) -> bool:
+    """Return True iff name contains only safe characters."""
+    return bool(re.fullmatch(r"[a-zA-Z0-9_-]+", name))
+
+
 # ---------------------------------------------------------------------------
-# Main dashboard page — single HTML file, no templates needed
+# API routes
+# ---------------------------------------------------------------------------
+
+@app.route("/api/state")
+def api_state():
+    """Backwards-compat: tries state_default.json, falls back to single running instance."""
+    default_path = os.path.join(DATA_DIR, "state_default.json")
+    if os.path.exists(default_path):
+        path = default_path
+    else:
+        # Find the single most-recently-modified state file
+        files = _get_all_state_files()
+        if not files:
+            resp = jsonify({"error": "No state file yet — paper trader hasn't started a tick"})
+            return _no_cache(resp)
+        _, path = files[0]
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        resp = jsonify(data)
+    except Exception as e:
+        resp = jsonify({"error": str(e)})
+    return _no_cache(resp)
+
+
+@app.route("/api/state/<name>")
+def api_state_named(name: str):
+    """Return full state JSON for one named instance."""
+    if not _valid_name(name):
+        abort(400, "Invalid instance name")
+
+    path = os.path.join(DATA_DIR, f"state_{name}.json")
+    if not os.path.exists(path):
+        resp = jsonify({"error": f"No state file for instance '{name}'"})
+        return _no_cache(resp)
+
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        resp = jsonify(data)
+    except Exception as e:
+        resp = jsonify({"error": str(e)})
+    return _no_cache(resp)
+
+
+@app.route("/api/instances")
+def api_instances():
+    """Return JSON summary of all instances (for overview page polling)."""
+    files   = _get_all_state_files()
+    summary = []
+    for name, _ in files:
+        data, is_live = _load_state(name)
+        if data is None:
+            continue
+        p = data.get("portfolio", {})
+        m = data.get("metrics",   {})
+        summary.append({
+            "name":            name,
+            "is_live":         is_live,
+            "strategy":        data.get("strategy", name),
+            "session_start":   data.get("session_start"),
+            "tick":            data.get("tick", 0),
+            "elapsed_minutes": data.get("elapsed_minutes", 0),
+            "remaining_minutes": data.get("remaining_minutes", 0),
+            "duration_minutes":  data.get("duration_minutes", 0),
+            "portfolio": {
+                "total_value":      p.get("total_value", 0),
+                "starting_cash":    p.get("starting_cash", 1000),
+                "total_return_pct": p.get("total_return_pct", 0),
+                "total_trades":     p.get("total_trades", 0),
+                "sell_trades":      p.get("sell_trades", 0),
+            },
+            "metrics": {
+                "win_rate_pct": m.get("win_rate_pct", 0),
+            },
+            "sparkline": _downsample(data.get("equity_curve", []), 50),
+        })
+    resp = jsonify(summary)
+    return _no_cache(resp)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard HTML — single-instance detail view
 # ---------------------------------------------------------------------------
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -67,7 +207,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>BurryBot — Paper Trading Dashboard</title>
+  <title>BurryBot — __INSTANCE_NAME__</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
     :root {
@@ -84,6 +224,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;
     }
     header h1 { font-size: 16px; color: var(--blue); letter-spacing: 1px; }
+    .back-link { color: var(--muted); text-decoration: none; font-size: 12px; margin-right: 12px; }
+    .back-link:hover { color: var(--blue); }
     #status-pill {
       display: flex; align-items: center; gap: 8px;
       background: var(--bg); border: 1px solid var(--border);
@@ -164,9 +306,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
 <div id="session-ended-banner">⚠ Trader session ended — data is frozen</div>
 <header>
-  <div>
-    <h1>⚡ BurryBot — Paper Trading Dashboard</h1>
-    <div id="header-meta" style="font-size:10px;color:var(--muted);margin-top:3px;">connecting…</div>
+  <div style="display:flex;align-items:center;">
+    <a class="back-link" href="/">← Overview</a>
+    <div>
+      <h1>⚡ BurryBot — __INSTANCE_NAME__</h1>
+      <div id="header-meta" style="font-size:10px;color:var(--muted);margin-top:3px;">connecting…</div>
+    </div>
   </div>
   <div id="status-pill">
     <span id="last-update">connecting…</span>
@@ -246,6 +391,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </main>
 
 <script>
+const INSTANCE_NAME = '__INSTANCE_NAME__';
+
 // ─── Error banner (visible on page if JS crashes) ────────────────────────────
 function showError(msg) {
   let el = document.getElementById('js-error-banner');
@@ -295,7 +442,7 @@ try {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      animation: { duration: 0 },  // instant updates, no transition delay
+      animation: { duration: 0 },
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
@@ -304,7 +451,7 @@ try {
       scales: {
         x: { ticks: { color: '#718096', font: { size: 10 } }, grid: { color: '#1e2130' } },
         y: {
-          grace: '5%',             // always show some y-range even on a flat equity curve
+          grace: '5%',
           ticks: { color: '#718096', font: { size: 10 }, callback: v => '$' + v.toFixed(2) },
           grid: { color: '#1e2130' }
         }
@@ -331,8 +478,7 @@ function badgeClass(action) {
 }
 function timeLabel(iso) {
   try {
-    // isoformat() produces "2026-02-23T22:00:00.123456" — append Z for UTC
-    const s = String(iso).replace(/(\.\d{3})\d+/, '$1');  // truncate microseconds → ms
+    const s = String(iso).replace(/(\\.\\d{3})\\d+/, '$1');
     const d = new Date(s.endsWith('Z') ? s : s + 'Z');
     if (!isFinite(d)) return iso;
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -340,13 +486,13 @@ function timeLabel(iso) {
 }
 
 // ─── Live status + heartbeat ─────────────────────────────────────────────────
-const STALE_SECONDS = 360;  // same threshold as status.py
+const STALE_SECONDS = 360;
 let isLive = false;
 let heartbeat = 0;
-let lastSuccessfulFetch = 0;  // epoch ms of last successful /api/state response
+let lastSuccessfulFetch = 0;
 
 function setLiveStatus(live) {
-  if (isLive === live) return;  // no change — skip DOM update
+  if (isLive === live) return;
   isLive = live;
   const dot    = document.getElementById('live-dot');
   const banner = document.getElementById('session-ended-banner');
@@ -360,7 +506,6 @@ function setLiveStatus(live) {
 }
 
 setInterval(() => {
-  // Mark stale if the API hasn't responded successfully for STALE_SECONDS
   if (lastSuccessfulFetch > 0 && (Date.now() - lastSuccessfulFetch) / 1000 >= STALE_SECONDS) {
     setLiveStatus(false);
   }
@@ -370,22 +515,19 @@ setInterval(() => {
   if (hbEl) hbEl.textContent = heartbeat;
 }, 1000);
 
-// ─── Main refresh (recursive setTimeout — never piles up) ────────────────────
+// ─── Main refresh ────────────────────────────────────────────────────────────
 async function refresh() {
-  // Step 1: fetch state (errors here are expected during startup — silent)
   let data;
   try {
-    const res = await fetch('/api/state?t=' + Date.now(), { cache: 'no-store' });
+    const res = await fetch('/api/state/' + INSTANCE_NAME + '?t=' + Date.now(), { cache: 'no-store' });
     if (!res.ok) { setLiveStatus(false); scheduleNext(); return; }
     data = await res.json();
   } catch { setLiveStatus(false); scheduleNext(); return; }
 
-  // Step 2: update DOM — wrapped so any bug shows visibly on the page
   try {
     const p = data.portfolio;
     const m = data.metrics;
 
-    // KPI cards
     document.getElementById('kpi-total').textContent  = fmt$(p.total_value);
     document.getElementById('kpi-start').textContent  = fmt$(p.starting_cash);
 
@@ -412,12 +554,11 @@ async function refresh() {
     const total   = parseFloat(data.duration_minutes) || 1;
     document.getElementById('time-bar').style.width = Math.min(100, elapsed / total * 100) + '%';
 
-    // Equity curve (only update if chart loaded successfully)
     if (equityChart) {
       const curve       = data.equity_curve || [];
       const tick        = parseFloat(data.tick) || 1;
-      const elapsed     = parseFloat(data.elapsed_minutes) || 0;
-      const minPerTick  = elapsed / tick;
+      const elapsedMin  = parseFloat(data.elapsed_minutes) || 0;
+      const minPerTick  = elapsedMin / tick;
       const startCash   = parseFloat(data.portfolio?.starting_cash) || 0;
 
       equityChart.data.labels              = curve.map((_, i) => '+' + Math.round(i * minPerTick) + 'm');
@@ -426,7 +567,6 @@ async function refresh() {
       equityChart.update('none');
     }
 
-    // Market signals
     const sigBody = document.getElementById('signals-body');
     if (data.market_signals && data.market_signals.length) {
       sigBody.innerHTML = data.market_signals.map(s => `
@@ -444,7 +584,6 @@ async function refresh() {
       sigBody.innerHTML = '<tr><td colspan="4" class="no-data">waiting for first tick…</td></tr>';
     }
 
-    // Open positions
     const posBody    = document.getElementById('positions-body');
     const totalValue = parseFloat(data.portfolio?.total_value) || 1;
     if (data.positions && data.positions.length) {
@@ -465,7 +604,6 @@ async function refresh() {
       posBody.innerHTML = '<tr><td colspan="6" class="no-data">no open positions</td></tr>';
     }
 
-    // Recent trades
     const trBody = document.getElementById('trades-body');
     if (data.recent_trades && data.recent_trades.length) {
       trBody.innerHTML = data.recent_trades.map(t => `
@@ -483,21 +621,18 @@ async function refresh() {
 
     lastSuccessfulFetch = Date.now();
 
-    // Header meta: strategy + session start
     const metaEl = document.getElementById('header-meta');
     if (metaEl && data.strategy) {
       const startStr = data.session_start ? timeLabel(data.session_start) : '—';
       metaEl.textContent = data.strategy + '  ·  started ' + startStr;
     }
 
-    // Live status: check updated_at age against stale threshold
     try {
-      const updStr = String(data.updated_at || '').replace(/(\.\d{3})\d+/, '$1');
+      const updStr = String(data.updated_at || '').replace(/(\\d{3})\\d+/, '$1');
       const updAt  = new Date(updStr.endsWith('Z') ? updStr : updStr + 'Z');
       setLiveStatus((Date.now() - updAt.getTime()) / 1000 < STALE_SECONDS);
     } catch { setLiveStatus(false); }
 
-    // Status pill — use browser's local time (avoids issues with server timestamp format)
     document.getElementById('last-update').textContent =
       'tick ' + data.tick + ' · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
@@ -513,7 +648,6 @@ function scheduleNext() {
   setTimeout(refresh, 1000);
 }
 
-// Kick off the first poll immediately
 refresh();
 </script>
 </body>
@@ -521,9 +655,341 @@ refresh();
 """
 
 
+# ---------------------------------------------------------------------------
+# Overview page HTML
+# ---------------------------------------------------------------------------
+
+OVERVIEW_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BurryBot — Multi-Instance Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
+      --text: #e2e8f0; --muted: #718096; --green: #48bb78;
+      --red: #fc8181; --yellow: #f6e05e; --blue: #63b3ed;
+      --purple: #b794f4; --accent: #667eea;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+
+    header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;
+    }
+    header h1 { font-size: 16px; color: var(--blue); letter-spacing: 1px; }
+    #header-right { display: flex; align-items: center; gap: 16px; }
+    #instance-counts { font-size: 11px; color: var(--muted); }
+    #instance-counts span { color: var(--text); }
+    #last-refresh { font-size: 10px; color: var(--muted); }
+
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+           animation: pulse 2s infinite; flex-shrink: 0; display: inline-block; }
+    .dot-dead { background: var(--red) !important; animation: none !important; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    main { padding: 24px; }
+
+    /* Empty state */
+    #empty-state {
+      display: none;
+      text-align: center; color: var(--muted); padding: 80px 0; font-size: 14px;
+    }
+    #empty-state p { margin-top: 12px; font-size: 12px; }
+
+    /* Instance grid */
+    #instances-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 16px;
+    }
+
+    /* Instance card — entire card is a link */
+    .instance-card {
+      display: block; text-decoration: none; color: inherit;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .instance-card:hover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .instance-card.dead  { opacity: 0.6; border-color: rgba(252,129,129,.4); }
+
+    .card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .card-title {
+      display: flex; align-items: center; gap: 8px;
+    }
+    .card-name { font-size: 14px; font-weight: 700; color: var(--text); }
+    .card-arrow { color: var(--muted); font-size: 16px; }
+
+    .card-meta { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
+
+    .card-stats {
+      display: flex; justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .card-stat-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+    .card-stat-value { font-size: 16px; font-weight: 700; margin-top: 2px; }
+    .pos  { color: var(--green); }
+    .neg  { color: var(--red); }
+    .neu  { color: var(--text); }
+
+    /* Mini sparkline */
+    .sparkline-wrap { position: relative; height: 80px; margin-bottom: 10px; }
+
+    .card-footer { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
+  </style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>⚡ BurryBot — Multi-Instance Dashboard</h1>
+  </div>
+  <div id="header-right">
+    <div id="instance-counts"><span id="live-count">0</span> live / <span id="total-count">0</span> total</div>
+    <div id="last-refresh">—</div>
+  </div>
+</header>
+
+<main>
+  <div id="empty-state">
+    <div style="font-size:32px;">📭</div>
+    <div>No running instances found</div>
+    <p>Start a paper trader with:<br><code>python main.py --strategy momentum --mode paper --duration 60</code></p>
+  </div>
+  <div id="instances-grid"></div>
+</main>
+
+<script>
+// ─── Helpers ────────────────────────────────────────────────────────────────
+function fmt$(v)   { return '$' + parseFloat(v).toFixed(2); }
+function fmtPct(v) { const n = parseFloat(v); return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
+function colorClass(v) { const n = parseFloat(v); return n > 0 ? 'pos' : (n < 0 ? 'neg' : 'neu'); }
+function fmtMin(m) {
+  if (!isFinite(m) || m <= 0) return '0m';
+  const h = Math.floor(m / 60), mm = Math.round(m % 60);
+  return h > 0 ? `${h}h ${mm}m` : `${mm}m`;
+}
+function timeLabel(iso) {
+  try {
+    const s = String(iso).replace(/(\\d{3})\\d+/, '$1');
+    const d = new Date(s.endsWith('Z') ? s : s + 'Z');
+    if (!isFinite(d)) return iso;
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch { return String(iso); }
+}
+
+// ─── Per-instance state map: name → { card, chart } ─────────────────────────
+const instanceMap = new Map();
+
+function createSparkChart(canvas, data) {
+  return new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: data.map((_, i) => i),
+      datasets: [{
+        data: data,
+        borderColor: '#667eea',
+        backgroundColor: 'rgba(102,126,234,0.12)',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.3,
+        fill: true,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 0 },
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      scales: {
+        x: { display: false },
+        y: { display: false, grace: '10%' }
+      }
+    }
+  });
+}
+
+function createInstanceCard(inst) {
+  const p   = inst.portfolio;
+  const m   = inst.metrics;
+  const live = inst.is_live;
+
+  const a = document.createElement('a');
+  a.className = 'instance-card' + (live ? '' : ' dead');
+  a.href      = '/instance/' + inst.name;
+
+  const startStr = inst.session_start ? timeLabel(inst.session_start) : '—';
+  const retPct   = parseFloat(p.total_return_pct) || 0;
+  const winRate  = parseFloat(m.win_rate_pct) || 0;
+  const tickInfo = live
+    ? `Tick ${inst.tick} · ${fmtMin(inst.remaining_minutes)} remaining`
+    : 'Session ended';
+
+  a.innerHTML = `
+    <div class="card-header">
+      <div class="card-title">
+        <span class="dot ${live ? '' : 'dot-dead'}"></span>
+        <span class="card-name">${inst.name}</span>
+      </div>
+      <span class="card-arrow">→</span>
+    </div>
+    <div class="card-meta">
+      ${inst.strategy}  ·  started ${startStr}
+    </div>
+    <div class="card-stats">
+      <div>
+        <div class="card-stat-label">Portfolio</div>
+        <div class="card-stat-value neu">${fmt$(p.total_value)}</div>
+      </div>
+      <div>
+        <div class="card-stat-label">Return</div>
+        <div class="card-stat-value ${colorClass(retPct)}" data-return>${fmtPct(retPct)}</div>
+      </div>
+    </div>
+    <div class="sparkline-wrap"><canvas></canvas></div>
+    <div class="card-footer">
+      <span data-tick>${tickInfo}</span>
+      <span data-trades>${p.total_trades} trades (${p.sell_trades} sells) · Win ${winRate.toFixed(1)}%</span>
+    </div>
+  `;
+
+  document.getElementById('instances-grid').appendChild(a);
+
+  // Init sparkline chart
+  const canvas = a.querySelector('canvas');
+  let chart = null;
+  try {
+    chart = createSparkChart(canvas, inst.sparkline || []);
+  } catch (e) { /* Chart.js unavailable */ }
+
+  instanceMap.set(inst.name, { card: a, chart });
+}
+
+function updateInstanceCard(inst) {
+  const entry = instanceMap.get(inst.name);
+  if (!entry) return;
+  const { card, chart } = entry;
+
+  const p    = inst.portfolio;
+  const m    = inst.metrics;
+  const live = inst.is_live;
+
+  // Live/dead styling
+  if (live) card.classList.remove('dead');
+  else       card.classList.add('dead');
+  const dot = card.querySelector('.dot');
+  if (dot) { live ? dot.classList.remove('dot-dead') : dot.classList.add('dot-dead'); }
+
+  // Return value
+  const retEl = card.querySelector('[data-return]');
+  const retPct = parseFloat(p.total_return_pct) || 0;
+  if (retEl) {
+    retEl.textContent = fmtPct(retPct);
+    retEl.className   = 'card-stat-value ' + colorClass(retPct);
+  }
+
+  // Portfolio value
+  const statVals = card.querySelectorAll('.card-stat-value');
+  if (statVals[0]) statVals[0].textContent = fmt$(p.total_value);
+
+  // Tick / remaining
+  const tickEl = card.querySelector('[data-tick]');
+  if (tickEl) {
+    tickEl.textContent = live
+      ? `Tick ${inst.tick} · ${fmtMin(inst.remaining_minutes)} remaining`
+      : 'Session ended';
+  }
+
+  // Trades
+  const tradesEl = card.querySelector('[data-trades]');
+  const winRate  = parseFloat(m.win_rate_pct) || 0;
+  if (tradesEl) {
+    tradesEl.textContent = `${p.total_trades} trades (${p.sell_trades} sells) · Win ${winRate.toFixed(1)}%`;
+  }
+
+  // Sparkline
+  if (chart) {
+    const d = inst.sparkline || [];
+    chart.data.labels           = d.map((_, i) => i);
+    chart.data.datasets[0].data = d;
+    chart.update('none');
+  }
+}
+
+// ─── Main poll loop ──────────────────────────────────────────────────────────
+async function pollInstances() {
+  let instances;
+  try {
+    const res = await fetch('/api/instances?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) { scheduleNext(); return; }
+    instances = await res.json();
+  } catch { scheduleNext(); return; }
+
+  const grid      = document.getElementById('instances-grid');
+  const emptyEl   = document.getElementById('empty-state');
+  const liveCountEl  = document.getElementById('live-count');
+  const totalCountEl = document.getElementById('total-count');
+  const lastRefEl    = document.getElementById('last-refresh');
+
+  if (!instances.length) {
+    emptyEl.style.display = 'block';
+    grid.style.display    = 'none';
+  } else {
+    emptyEl.style.display = 'none';
+    grid.style.display    = '';
+  }
+
+  let liveCount = 0;
+  for (const inst of instances) {
+    if (inst.is_live) liveCount++;
+    if (instanceMap.has(inst.name)) {
+      updateInstanceCard(inst);
+    } else {
+      createInstanceCard(inst);
+    }
+  }
+
+  if (liveCountEl)  liveCountEl.textContent  = liveCount;
+  if (totalCountEl) totalCountEl.textContent = instances.length;
+  if (lastRefEl)    lastRefEl.textContent     = 'updated ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+
+  scheduleNext();
+}
+
+function scheduleNext() {
+  setTimeout(pollInstances, 2000);
+}
+
+pollInstances();
+</script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.route("/")
 def index():
-    return Response(DASHBOARD_HTML, mimetype="text/html")
+    resp = Response(OVERVIEW_HTML, mimetype="text/html")
+    return _no_cache(resp)
+
+
+@app.route("/instance/<name>")
+def instance_detail(name: str):
+    if not _valid_name(name):
+        abort(400, "Invalid instance name")
+    html = DASHBOARD_HTML.replace("__INSTANCE_NAME__", name)
+    resp = Response(html, mimetype="text/html")
+    return _no_cache(resp)
 
 
 # ---------------------------------------------------------------------------
@@ -536,14 +1002,26 @@ def start_in_thread(host: str = "127.0.0.1", port: int = 5000) -> None:
 
     Being a daemon thread means it dies automatically when the main program exits —
     no need to manually shut it down.
+
+    Raises OSError if the port is already in use.
     """
+    import socket
+    # Quick pre-check so callers can catch the error before starting the thread
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+        except OSError:
+            raise OSError(f"Port {port} is already in use")
+
     def _run():
         _redirect_werkzeug_to_file()
-        # use_reloader=False is required when running inside a thread
         app.run(host=host, port=port, use_reloader=False, threaded=True)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
+    # Brief pause to let Flask start up before the caller prints the banner
+    time.sleep(0.3)
     print(f"\nDashboard running at → http://{host}:{port}")
     print("Open that URL in your browser. It refreshes every second.\n")
 

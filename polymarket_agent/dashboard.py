@@ -628,8 +628,7 @@ async function refresh() {
     }
 
     try {
-      const updStr = String(data.updated_at || '').replace(/(\\d{3})\\d+/, '$1');
-      const updAt  = new Date(updStr.endsWith('Z') ? updStr : updStr + 'Z');
+      const updAt = new Date(String(data.updated_at || '').substring(0, 19) + 'Z');
       setLiveStatus((Date.now() - updAt.getTime()) / 1000 < STALE_SECONDS);
     } catch { setLiveStatus(false); }
 
@@ -777,7 +776,7 @@ function fmtMin(m) {
 }
 function timeLabel(iso) {
   try {
-    const s = String(iso).replace(/(\\d{3})\\d+/, '$1');
+    const s = String(iso).replace(/(\\.\\d{3})\\d+/, '$1');
     const d = new Date(s.endsWith('Z') ? s : s + 'Z');
     if (!isFinite(d)) return iso;
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });

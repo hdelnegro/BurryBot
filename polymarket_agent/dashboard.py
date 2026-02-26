@@ -220,8 +220,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="panel" style="overflow:auto; max-height:290px;">
       <h2>Market Signals (latest)</h2>
       <table>
-        <thead><tr><th>Market</th><th>Price</th><th>Signal</th></tr></thead>
-        <tbody id="signals-body"><tr><td colspan="3" class="no-data">waiting for first tick…</td></tr></tbody>
+        <thead><tr><th>Market</th><th>Price</th><th>Signal</th><th>Conf</th></tr></thead>
+        <tbody id="signals-body"><tr><td colspan="4" class="no-data">waiting for first tick…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -267,17 +267,30 @@ try {
     type: 'line',
     data: {
       labels: [],
-      datasets: [{
-        label: 'Portfolio Value ($)',
-        data: [],
-        borderColor: '#667eea',
-        backgroundColor: 'rgba(102,126,234,0.12)',
-        borderWidth: 2,
-        pointRadius: 0,          // no dots — faster with many data points
-        pointHoverRadius: 4,     // dot appears on hover
-        tension: 0.3,
-        fill: true,
-      }]
+      datasets: [
+        {
+          label: 'Portfolio Value ($)',
+          data: [],
+          borderColor: '#667eea',
+          backgroundColor: 'rgba(102,126,234,0.12)',
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          tension: 0.3,
+          fill: true,
+        },
+        {
+          label: 'Starting Cash',
+          data: [],
+          borderColor: 'rgba(113,128,150,0.5)',
+          borderWidth: 1,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          tension: 0,
+          fill: false,
+        }
+      ]
     },
     options: {
       responsive: true,
@@ -401,9 +414,15 @@ async function refresh() {
 
     // Equity curve (only update if chart loaded successfully)
     if (equityChart) {
-      const curve = data.equity_curve || [];
-      equityChart.data.labels              = curve.map((_, i) => 'T' + (i + 1));
+      const curve       = data.equity_curve || [];
+      const tick        = parseFloat(data.tick) || 1;
+      const elapsed     = parseFloat(data.elapsed_minutes) || 0;
+      const minPerTick  = elapsed / tick;
+      const startCash   = parseFloat(data.portfolio?.starting_cash) || 0;
+
+      equityChart.data.labels              = curve.map((_, i) => '+' + Math.round(i * minPerTick) + 'm');
       equityChart.data.datasets[0].data    = curve;
+      equityChart.data.datasets[1].data    = curve.map(() => startCash);
       equityChart.update('none');
     }
 
@@ -419,9 +438,10 @@ async function refresh() {
           </td>
           <td>${parseFloat(s.price).toFixed(4)}</td>
           <td><span class="badge ${badgeClass(s.signal)}">${s.signal}</span></td>
+          <td style="color:var(--muted)">${s.signal === 'HOLD' ? '—' : (parseFloat(s.confidence) * 100).toFixed(0) + '%'}</td>
         </tr>`).join('');
     } else {
-      sigBody.innerHTML = '<tr><td colspan="3" class="no-data">waiting for first tick…</td></tr>';
+      sigBody.innerHTML = '<tr><td colspan="4" class="no-data">waiting for first tick…</td></tr>';
     }
 
     // Open positions

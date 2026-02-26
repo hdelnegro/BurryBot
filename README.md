@@ -64,6 +64,8 @@ Available strategies: `momentum`, `mean_reversion`, `rsi`, `random_baseline`
 
 All configuration (API URLs, position sizing limits, strategy parameters) lives in `config.py`.
 
+For an explanation of the performance metrics (Sharpe ratio, max drawdown, win rate) and strategy concepts (momentum, mean reversion, RSI), see [docs/trading_concepts.md](docs/trading_concepts.md).
+
 ---
 
 ## Technologies

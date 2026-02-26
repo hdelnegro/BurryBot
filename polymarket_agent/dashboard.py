@@ -110,7 +110,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .neu  { color: var(--text); }
 
     /* Two-column layout: chart + signals */
-    .mid { display: grid; grid-template-columns: 1fr 380px; gap: 16px; }
+    .mid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
     .panel {
       background: var(--surface); border: 1px solid var(--border);
@@ -219,8 +219,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="panel" style="overflow:auto; max-height:290px;">
       <h2>Market Signals (latest)</h2>
-      <table>
-        <thead><tr><th>Market</th><th>Price</th><th>Signal</th><th>Conf</th></tr></thead>
+      <table style="table-layout:fixed">
+        <thead><tr><th>Market</th><th style="width:70px">Price</th><th style="width:64px">Signal</th><th style="width:44px">Conf</th></tr></thead>
         <tbody id="signals-body"><tr><td colspan="4" class="no-data">waiting for first tick…</td></tr></tbody>
       </table>
     </div>
@@ -431,8 +431,8 @@ async function refresh() {
     if (data.market_signals && data.market_signals.length) {
       sigBody.innerHTML = data.market_signals.map(s => `
         <tr>
-          <td>
-            <div style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+          <td style="overflow:hidden">
+            <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                  title="${s.question || ''}">${(s.slug || '').replace(/-/g,' ')}</div>
             <div class="reason-text">${s.reason || ''}</div>
           </td>

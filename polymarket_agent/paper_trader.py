@@ -79,12 +79,14 @@ class PaperTrader:
         risk_manager:     RiskManager,
         num_markets:      int = 5,
         duration_minutes: int = 60,
+        instance_name:    str = None,
     ):
         self.strategy         = strategy
         self.portfolio        = portfolio
         self.risk_manager     = risk_manager
         self.num_markets      = num_markets
         self.duration_minutes = duration_minutes
+        self.instance_name    = instance_name or "default"
 
         # In-memory price history for each token (built up over the session)
         # Dict: token_id → list of PriceBar
@@ -127,8 +129,10 @@ class PaperTrader:
 
         import sys as _sys
         print(f"\nPaper Trading Mode — {self.strategy.name}")
+        print(f"Instance:  {self.instance_name}")
         print(f"Markets: {self.num_markets} | Duration: {self.duration_minutes} min")
         print(f"Poll interval: {PAPER_POLL_INTERVAL_SECONDS}s | Starting cash: ${self.portfolio.cash:.2f}")
+        print(f"State file: data/state_{self.instance_name}.json")
         print("-" * 55)
         _sys.stdout.flush()
 
@@ -622,6 +626,7 @@ class PaperTrader:
 
         state = {
             "updated_at":       now.isoformat(),
+            "instance_name":    self.instance_name,
             "tick":             self.tick_count,
             "strategy":         self.strategy.name,
             "duration_minutes": self.duration_minutes,
@@ -650,8 +655,9 @@ class PaperTrader:
         }
 
         os.makedirs(DATA_DIR, exist_ok=True)
-        tmp_path   = os.path.join(DATA_DIR, "state.json.tmp")
-        state_path = os.path.join(DATA_DIR, "state.json")
+        state_filename = f"state_{self.instance_name}.json"
+        tmp_path   = os.path.join(DATA_DIR, state_filename + ".tmp")
+        state_path = os.path.join(DATA_DIR, state_filename)
         with open(tmp_path, "w") as f:
             json.dump(state, f, indent=2)
         os.replace(tmp_path, state_path)

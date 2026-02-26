@@ -363,6 +363,25 @@ def interactive_setup() -> argparse.Namespace:
         print(f"  Dashboard: {'yes' if dashboard else 'no'}")
     else:
         print(f"  No-fetch : {'yes' if no_fetch else 'no'}")
+
+    # Build and display the equivalent CLI command
+    cmd_parts = [
+        "python main.py",
+        f"--strategy {strategy}",
+        f"--mode {mode}",
+        f"--markets {markets}",
+        f"--cash {int(cash)}",
+    ]
+    if mode == "paper":
+        cmd_parts.append(f"--duration {duration}")
+        if dashboard:
+            cmd_parts.append("--dashboard")
+    else:
+        if no_fetch:
+            cmd_parts.append("--no-fetch")
+    print(f"\n  {DIM}CLI equivalent:{RESET}")
+    print(f"  {CYAN}{' '.join(cmd_parts)}{RESET}")
+
     print(BOLD + "─" * 55 + RESET)
 
     confirm = pick("Start?", [

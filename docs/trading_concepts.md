@@ -12,6 +12,116 @@ A YES token priced at `0.72` means the market thinks there's a 72% chance the ev
 
 ---
 
+## How Prediction Markets Work — FAQ
+
+### When I sell, who buys?
+
+Polymarket uses a **Central Limit Order Book (CLOB)** — the same mechanism used by stock exchanges. When you place a sell order, you're not selling to Polymarket itself; you're posting an offer that sits in the order book until another trader places a matching buy order.
+
+In practice, a significant share of the liquidity on Polymarket comes from **market makers** — automated traders (often professional firms) that continuously post both buy and sell orders across many markets. They don't have strong opinions on outcomes; they profit from the spread between the price they buy at and the price they sell at. Their presence means there is almost always *someone* willing to transact, though not necessarily at the price you want.
+
+So when you sell YES tokens at `0.60`, either:
+- Another trader who believes the probability is higher than 60% takes the other side, or
+- A market maker absorbs your sell and adjusts their inventory, planning to re-sell to someone else later.
+
+---
+
+### Is it possible to want to sell and find no one buying?
+
+Yes. This is called **liquidity risk**, and it is real on Polymarket — especially in smaller, newer, or niche markets.
+
+In thin markets the order book may have very few open buy orders. If you post a sell at `0.60` and the best available buyer is only willing to pay `0.45`, you face a choice: accept the lower price, wait and hope someone better comes along, or cancel the order. In a paper trading simulation like BurryBot, trades execute at the last known price without modelling this friction — which is one reason real results may differ from paper results.
+
+This is also why BurryBot defaults to watching **high-volume markets**: more volume means more participants, a tighter bid-ask spread, and a much lower chance of being stuck holding a position you can't exit.
+
+---
+
+### What is the bid-ask spread?
+
+The **bid** is the highest price any buyer is currently willing to pay. The **ask** is the lowest price any seller is currently willing to accept. The gap between them is the spread.
+
+```
+Bid: 0.58  |  Ask: 0.62  →  Spread: 0.04
+```
+
+If you want to buy immediately (a "market order"), you pay the ask (`0.62`). If you want to sell immediately, you receive the bid (`0.58`). The spread is effectively a transaction cost you pay every time you enter or exit a position — even before accounting for platform fees.
+
+Liquid markets have tight spreads (0.01–0.02). Illiquid markets can have spreads of 0.10 or more, meaning you are already down 10% the moment you buy.
+
+---
+
+### What happens when a market resolves?
+
+When the event's outcome is determined, Polymarket resolves the market:
+
+- **YES tokens** pay out **$1.00** if the event happened, **$0.00** if it didn't.
+- **NO tokens** pay out the inverse.
+
+If you hold YES tokens worth `0.70` each and the event happens, each token becomes worth `$1.00` — a 43% gain. If the event doesn't happen, they become worth `$0.00` — a total loss.
+
+BurryBot's paper trader monitors market end dates and force-closes any open position when a market resolves, using the last known price before resolution.
+
+---
+
+### Can I trade NO tokens?
+
+Yes. On Polymarket you can trade either side of any market. Buying NO tokens is equivalent to betting against the event. A NO token priced at `0.28` means the market thinks there's only a 28% chance the event *doesn't* happen (equivalently, a 72% chance it does).
+
+BurryBot currently trades only YES tokens for simplicity. Adding NO token trading would require tracking which side of the market each position is on, but the strategy logic would remain identical.
+
+---
+
+### What is slippage?
+
+Slippage is the difference between the price you expected to trade at and the price you actually got. It happens for two reasons:
+
+1. **Thin order books**: if you want to sell 1,000 shares and only 200 shares are bid at `0.60`, the remaining 800 fill at progressively worse prices (`0.59`, `0.58`, etc.).
+2. **Latency**: by the time your order reaches the exchange, someone else may have already taken the best available price.
+
+BurryBot's paper trading does not model slippage — all trades execute at the last fetched price. In live trading, slippage would reduce returns, particularly for large positions in low-volume markets.
+
+---
+
+### What are the fees?
+
+Polymarket charges a percentage fee on each trade (the exact rate varies and is subject to change). BurryBot models a simplified fee in `config.py` (`TRADE_FEE_PCT`) that is deducted from each executed trade. The fee is small per trade but compounds over many trades — a strategy that trades frequently needs a larger edge to overcome it.
+
+---
+
+### Why does a market's price change if no one has traded recently?
+
+Prices only change when trades happen. If a market sits at `0.72` and no one trades, it stays at `0.72` — even if the event's true probability has shifted. This is different from stocks, where prices can update on news without a trade occurring.
+
+In practice, active markets update frequently because traders are constantly re-evaluating the probability based on new information and placing orders. Quieter markets can go hours or days without meaningful price movement, which is why BurryBot may see "no new bar" messages during ticks for less active markets.
+
+---
+
+### How is this different from betting?
+
+The mechanics look similar but there are meaningful differences:
+
+- **Prices are set by the market, not a bookmaker.** There is no house setting odds and taking a guaranteed cut. Prices reflect the aggregate views of all participants.
+- **You can exit before resolution.** In a sportsbet you're locked in until the game ends. In a prediction market you can sell your position at any time, realising a profit or cutting a loss without waiting for the event.
+- **The crowd is often well-calibrated.** Research consistently shows that prediction market prices are among the most accurate forecasts available for many types of events — more accurate than polls, pundits, and most quantitative models. Beating the market consistently is hard.
+
+---
+
+### Why might paper trading results not match live trading results?
+
+Several real-world frictions are not modelled in paper trading:
+
+| Factor | Paper trading | Live trading |
+|--------|--------------|--------------|
+| Bid-ask spread | Ignored — trades at mid price | You pay the spread on every entry and exit |
+| Slippage | Ignored | Large orders move the price against you |
+| Liquidity | Assumed infinite | May not be able to fill at desired size |
+| Latency | Instant | Orders take time to reach the exchange |
+| Fees | Approximated | Exact fee schedule applies |
+
+This gap between paper and live performance is sometimes called the **paper trading illusion** — a strategy that looks profitable in simulation may break even or lose once real frictions are applied. The purpose of paper trading in BurryBot is to validate strategy *logic* and *behaviour*, not to produce exact predictions of live returns.
+
+---
+
 ## Performance Metrics
 
 ### Sharpe Ratio

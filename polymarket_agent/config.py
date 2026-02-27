@@ -151,5 +151,26 @@ BTC_UPDOWN_5M_PREFIX = "btc-updown-5m"
 # ---------------------------------------------------------------------------
 # Phase flags
 # ---------------------------------------------------------------------------
-PAPER_TRADING_ENABLED = True    # Phase 2: simulate live trading without real money
-LIVE_TRADING_ENABLED  = False   # Phase 3: real orders through py-clob-client
+PAPER_TRADING_ENABLED = True   # Phase 2: simulate live trading without real money
+LIVE_TRADING_ENABLED  = True   # Phase 3: real orders through py-clob-client
+
+
+# ---------------------------------------------------------------------------
+# Live trading settings (Phase 3)
+# ---------------------------------------------------------------------------
+
+# Polygon chain ID (required by py-clob-client)
+POLY_CHAIN_ID = 137
+
+# Polymarket CLOB API host
+CLOB_HOST = "https://clob.polymarket.com"
+
+# Order type for live trades: GTC = Good-Til-Cancelled limit orders
+LIVE_ORDER_TYPE = "GTC"
+
+# Maximum acceptable price slippage on limit orders (2% = 0.02)
+# Buy orders: price + slippage; Sell orders: price - slippage
+LIVE_SLIPPAGE_TOLERANCE = 0.02
+
+# Minimum order size in USDC — orders smaller than this are skipped
+LIVE_MIN_ORDER_SIZE_USDC = 1.0

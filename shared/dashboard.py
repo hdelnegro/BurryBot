@@ -1,16 +1,20 @@
 """
-dashboard.py — Live web dashboard for paper trading sessions.
+shared/dashboard.py — Live web dashboard for all BurryBot paper trading sessions.
 
 Serves a browser dashboard at http://localhost:5000.
+Discovers state files from ALL *_agent/data/ directories automatically.
 
-Overview page (/) shows all running/recent instances as cards.
+Overview page (/) shows all running/recent instances as cards with platform badges.
 Detail page (/instance/<name>) shows the full single-instance view.
 
-Start automatically via:
-  python main.py --strategy momentum --mode paper --duration 60 --dashboard
+Run standalone:
+  cd BurryBot
+  source shared/venv/bin/activate
+  python shared/dashboard.py
 
-Or standalone (if traders are already running in other terminals):
-  python dashboard.py
+Or automatically via an agent's --dashboard flag:
+  cd polymarket_agent && source venv/bin/activate
+  python main.py --strategy momentum --mode paper --duration 60 --dashboard
 """
 
 import glob
@@ -23,9 +27,10 @@ import time
 
 from flask import Flask, jsonify, Response, abort
 
-from config import DATA_DIR
+# BurryBot root dir (parent of shared/)
+_BURRYBOT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-LOGS_DIR   = "logs"
+LOGS_DIR   = os.path.join(_BURRYBOT_ROOT, "shared", "logs")
 ACCESS_LOG = os.path.join(LOGS_DIR, "dashboard_access.log")
 
 STALE_SECONDS = 360  # same threshold as status.py
@@ -34,7 +39,7 @@ app = Flask(__name__)
 
 
 def _redirect_werkzeug_to_file() -> None:
-    """Send Werkzeug HTTP access logs to logs/dashboard_access.log instead of stdout."""
+    """Send Werkzeug HTTP access logs to shared/logs/dashboard_access.log."""
     os.makedirs(LOGS_DIR, exist_ok=True)
     handler = logging.FileHandler(ACCESS_LOG)
     handler.setLevel(logging.INFO)
@@ -57,28 +62,43 @@ def _no_cache(resp):
 
 def _get_all_state_files():
     """
-    Glob data/state_*.json and return list of (name, path) sorted by mtime desc.
+    Glob all *_agent/data/state_*.json across the BurryBot repo root.
+    Returns list of (name, path) sorted by mtime desc.
     """
-    pattern = os.path.join(DATA_DIR, "state_*.json")
+    pattern = os.path.join(_BURRYBOT_ROOT, "*_agent", "data", "state_*.json")
     paths   = glob.glob(pattern)
     paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     results = []
     for path in paths:
-        basename = os.path.basename(path)          # state_foo.json
-        name     = basename[len("state_"):-len(".json")]   # foo
+        basename = os.path.basename(path)                      # state_foo.json
+        name     = basename[len("state_"):-len(".json")]       # foo
         results.append((name, path))
     return results
 
 
+def _find_state_path(name: str):
+    """
+    Find the state file for a given instance name across all agent data dirs.
+    Returns the path, or None if not found.
+    """
+    pattern = os.path.join(_BURRYBOT_ROOT, "*_agent", "data", f"state_{name}.json")
+    matches = glob.glob(pattern)
+    if not matches:
+        return None
+    # If multiple matches (shouldn't happen), prefer most recently modified
+    matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return matches[0]
+
+
 def _load_state(name: str):
     """
-    Read data/state_<name>.json.
+    Read state_<name>.json from whichever agent's data dir contains it.
 
     Returns (data_dict, is_live) where is_live is True if updated_at is recent.
     Returns (None, False) if file doesn't exist or is unreadable.
     """
-    path = os.path.join(DATA_DIR, f"state_{name}.json")
-    if not os.path.exists(path):
+    path = _find_state_path(name)
+    if path is None:
         return None, False
     try:
         with open(path) as f:
@@ -121,12 +141,11 @@ def _valid_name(name: str) -> bool:
 
 @app.route("/api/state")
 def api_state():
-    """Backwards-compat: tries state_default.json, falls back to single running instance."""
-    default_path = os.path.join(DATA_DIR, "state_default.json")
-    if os.path.exists(default_path):
+    """Backwards-compat: tries state_default.json, falls back to most recent."""
+    default_path = _find_state_path("default")
+    if default_path:
         path = default_path
     else:
-        # Find the single most-recently-modified state file
         files = _get_all_state_files()
         if not files:
             resp = jsonify({"error": "No state file yet — paper trader hasn't started a tick"})
@@ -148,8 +167,8 @@ def api_state_named(name: str):
     if not _valid_name(name):
         abort(400, "Invalid instance name")
 
-    path = os.path.join(DATA_DIR, f"state_{name}.json")
-    if not os.path.exists(path):
+    path = _find_state_path(name)
+    if path is None:
         resp = jsonify({"error": f"No state file for instance '{name}'"})
         return _no_cache(resp)
 
@@ -176,6 +195,7 @@ def api_instances():
         summary.append({
             "name":            name,
             "is_live":         is_live,
+            "platform":        data.get("platform", "polymarket"),
             "strategy":        data.get("strategy", name),
             "session_start":   data.get("session_start"),
             "tick":            data.get("tick", 0),
@@ -238,7 +258,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     main { padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
 
-    /* Cards row */
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
     .card {
       background: var(--surface); border: 1px solid var(--border);
@@ -251,7 +270,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .neg  { color: var(--red); }
     .neu  { color: var(--text); }
 
-    /* Two-column layout: chart + signals */
     .mid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
     .panel {
@@ -261,10 +279,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
                 color: var(--muted); margin-bottom: 12px; }
 
-    /* Chart */
     #chart-wrap { position: relative; height: 220px; }
 
-    /* Tables */
     table { width: 100%; border-collapse: collapse; }
     th { font-size: 10px; text-transform: uppercase; letter-spacing: .6px;
          color: var(--muted); padding: 4px 8px; text-align: left;
@@ -285,16 +301,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     #last-update { font-size: 10px; color: var(--muted); }
 
-    /* Bottom: positions + trades side by side */
     .bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
     .no-data { color: var(--muted); font-size: 12px; padding: 12px 0; text-align: center; }
 
-    /* Progress bar for time remaining */
     .progress-wrap { background: var(--bg); border-radius: 4px; height: 5px; margin-top: 8px; overflow: hidden; }
     .progress-bar  { height: 100%; background: var(--accent); border-radius: 4px; transition: width .5s; }
 
-    /* Session ended banner */
     #session-ended-banner {
       display: none;
       background: rgba(252,129,129,.12); border-bottom: 1px solid rgba(252,129,129,.4);
@@ -304,12 +317,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-<div id="session-ended-banner">⚠ Trader session ended — data is frozen</div>
+<div id="session-ended-banner">&#9888; Trader session ended — data is frozen</div>
 <header>
   <div style="display:flex;align-items:center;">
-    <a class="back-link" href="/">← Overview</a>
+    <a class="back-link" href="/">&#8592; Overview</a>
     <div>
-      <h1>⚡ BurryBot — __INSTANCE_NAME__</h1>
+      <h1>&#9889; BurryBot — __INSTANCE_NAME__</h1>
       <div id="header-meta" style="font-size:10px;color:var(--muted);margin-top:3px;">connecting…</div>
     </div>
   </div>
@@ -321,7 +334,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </header>
 
 <main>
-  <!-- KPI Cards -->
   <div class="cards">
     <div class="card">
       <div class="label">Portfolio Value</div>
@@ -356,7 +368,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Equity curve + market signals -->
   <div class="mid">
     <div class="panel">
       <h2>Equity Curve</h2>
@@ -371,7 +382,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Open positions + recent trades -->
   <div class="bottom">
     <div class="panel" style="overflow:auto;">
       <h2>Open Positions</h2>
@@ -393,7 +403,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 const INSTANCE_NAME = '__INSTANCE_NAME__';
 
-// ─── Error banner (visible on page if JS crashes) ────────────────────────────
 function showError(msg) {
   let el = document.getElementById('js-error-banner');
   if (!el) {
@@ -403,10 +412,9 @@ function showError(msg) {
                        'padding:6px 14px;font-size:12px;z-index:9999;font-family:monospace;';
     document.body.prepend(el);
   }
-  el.textContent = '⚠ JS error: ' + msg;
+  el.textContent = '&#9888; JS error: ' + msg;
 }
 
-// ─── Chart setup (optional — gracefully skipped if Chart.js CDN unavailable) ─
 let equityChart = null;
 try {
   const ctx = document.getElementById('equity-chart').getContext('2d');
@@ -464,7 +472,6 @@ try {
     'Chart unavailable (Chart.js failed to load)</div>';
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
 function fmt$(v)   { return '$' + parseFloat(v).toFixed(2); }
 function fmtPct(v) { const n = parseFloat(v); return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
 function fmtMin(m) {
@@ -478,16 +485,15 @@ function badgeClass(action) {
 }
 function timeLabel(iso) {
   try {
-    const s = String(iso).replace(/(\\.\\d{3})\\d+/, '$1');
+    const s = String(iso).replace(/(\\..{3})\\d+/, '$1');
     const d = new Date(s.endsWith('Z') ? s : s + 'Z');
     if (!isFinite(d)) return iso;
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   } catch { return String(iso); }
 }
 
-// ─── Live status + heartbeat ─────────────────────────────────────────────────
 const STALE_SECONDS = 360;
-let isLive = true;  // matches the dot's initial green DOM state; first setLiveStatus(false) will fire correctly
+let isLive = true;
 let heartbeat = 0;
 let lastSuccessfulFetch = 0;
 
@@ -515,7 +521,6 @@ setInterval(() => {
   if (hbEl) hbEl.textContent = heartbeat;
 }, 1000);
 
-// ─── Main refresh ────────────────────────────────────────────────────────────
 async function refresh() {
   let data;
   try {
@@ -623,8 +628,9 @@ async function refresh() {
 
     const metaEl = document.getElementById('header-meta');
     if (metaEl && data.strategy) {
-      const startStr = data.session_start ? timeLabel(data.session_start) : '—';
-      metaEl.textContent = data.strategy + '  ·  started ' + startStr;
+      const startStr   = data.session_start ? timeLabel(data.session_start) : '—';
+      const platformStr = data.platform ? ` · ${data.platform}` : '';
+      metaEl.textContent = data.strategy + '  ·  started ' + startStr + platformStr;
     }
 
     try {
@@ -692,21 +698,18 @@ OVERVIEW_HTML = """<!DOCTYPE html>
 
     main { padding: 24px; }
 
-    /* Empty state */
     #empty-state {
       display: none;
       text-align: center; color: var(--muted); padding: 80px 0; font-size: 14px;
     }
     #empty-state p { margin-top: 12px; font-size: 12px; }
 
-    /* Instance grid */
     #instances-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
       gap: 16px;
     }
 
-    /* Instance card — entire card is a link */
     .instance-card {
       display: block; text-decoration: none; color: inherit;
       background: var(--surface); border: 1px solid var(--border);
@@ -726,6 +729,15 @@ OVERVIEW_HTML = """<!DOCTYPE html>
     .card-name { font-size: 14px; font-weight: 700; color: var(--text); }
     .card-arrow { color: var(--muted); font-size: 16px; }
 
+    /* Platform badge pill */
+    .badge-platform {
+      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      font-size: 9px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase;
+    }
+    .badge-platform-polymarket { background: rgba(99,179,237,.15); color: #63b3ed; }
+    .badge-platform-kalshi     { background: rgba(154,205,50,.15);  color: #9acd32; }
+    .badge-platform-unknown    { background: rgba(113,128,150,.15); color: #718096; }
+
     .card-meta { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
 
     .card-stats {
@@ -738,7 +750,6 @@ OVERVIEW_HTML = """<!DOCTYPE html>
     .neg  { color: var(--red); }
     .neu  { color: var(--text); }
 
-    /* Mini sparkline */
     .sparkline-wrap { position: relative; height: 80px; margin-bottom: 10px; }
 
     .card-footer { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
@@ -747,7 +758,7 @@ OVERVIEW_HTML = """<!DOCTYPE html>
 <body>
 <header>
   <div>
-    <h1>⚡ BurryBot — Multi-Instance Dashboard</h1>
+    <h1>&#9889; BurryBot — Multi-Instance Dashboard</h1>
   </div>
   <div id="header-right">
     <div id="instance-counts"><span id="live-count">0</span> live / <span id="total-count">0</span> total</div>
@@ -757,7 +768,7 @@ OVERVIEW_HTML = """<!DOCTYPE html>
 
 <main>
   <div id="empty-state">
-    <div style="font-size:32px;">📭</div>
+    <div style="font-size:32px;">&#128077;</div>
     <div>No running instances found</div>
     <p>Start a paper trader with:<br><code>python main.py --strategy momentum --mode paper --duration 60</code></p>
   </div>
@@ -765,7 +776,6 @@ OVERVIEW_HTML = """<!DOCTYPE html>
 </main>
 
 <script>
-// ─── Helpers ────────────────────────────────────────────────────────────────
 function fmt$(v)   { return '$' + parseFloat(v).toFixed(2); }
 function fmtPct(v) { const n = parseFloat(v); return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
 function colorClass(v) { const n = parseFloat(v); return n > 0 ? 'pos' : (n < 0 ? 'neg' : 'neu'); }
@@ -776,14 +786,19 @@ function fmtMin(m) {
 }
 function timeLabel(iso) {
   try {
-    const s = String(iso).replace(/(\\.\\d{3})\\d+/, '$1');
+    const s = String(iso).replace(/(\\..{3})\\d+/, '$1');
     const d = new Date(s.endsWith('Z') ? s : s + 'Z');
     if (!isFinite(d)) return iso;
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   } catch { return String(iso); }
 }
+function platformBadgeClass(platform) {
+  const p = (platform || 'unknown').toLowerCase();
+  if (p === 'polymarket') return 'badge-platform badge-platform-polymarket';
+  if (p === 'kalshi')     return 'badge-platform badge-platform-kalshi';
+  return 'badge-platform badge-platform-unknown';
+}
 
-// ─── Per-instance state map: name → { card, chart } ─────────────────────────
 const instanceMap = new Map();
 
 function createSparkChart(canvas, data) {
@@ -815,28 +830,30 @@ function createSparkChart(canvas, data) {
 }
 
 function createInstanceCard(inst) {
-  const p   = inst.portfolio;
-  const m   = inst.metrics;
+  const p    = inst.portfolio;
+  const m    = inst.metrics;
   const live = inst.is_live;
 
   const a = document.createElement('a');
   a.className = 'instance-card' + (live ? '' : ' dead');
   a.href      = '/instance/' + inst.name;
 
-  const startStr = inst.session_start ? timeLabel(inst.session_start) : '—';
-  const retPct   = parseFloat(p.total_return_pct) || 0;
-  const winRate  = parseFloat(m.win_rate_pct) || 0;
-  const tickInfo = live
+  const startStr  = inst.session_start ? timeLabel(inst.session_start) : '—';
+  const retPct    = parseFloat(p.total_return_pct) || 0;
+  const winRate   = parseFloat(m.win_rate_pct) || 0;
+  const tickInfo  = live
     ? `Tick ${inst.tick} · ${fmtMin(inst.remaining_minutes)} remaining`
     : 'Session ended';
+  const platform  = inst.platform || 'polymarket';
 
   a.innerHTML = `
     <div class="card-header">
       <div class="card-title">
         <span class="dot ${live ? '' : 'dot-dead'}"></span>
         <span class="card-name">${inst.name}</span>
+        <span class="${platformBadgeClass(platform)}">${platform}</span>
       </div>
-      <span class="card-arrow">→</span>
+      <span class="card-arrow">&#8594;</span>
     </div>
     <div class="card-meta">
       ${inst.strategy}  ·  started ${startStr}
@@ -860,7 +877,6 @@ function createInstanceCard(inst) {
 
   document.getElementById('instances-grid').appendChild(a);
 
-  // Init sparkline chart
   const canvas = a.querySelector('canvas');
   let chart = null;
   try {
@@ -879,25 +895,21 @@ function updateInstanceCard(inst) {
   const m    = inst.metrics;
   const live = inst.is_live;
 
-  // Live/dead styling
   if (live) card.classList.remove('dead');
   else       card.classList.add('dead');
   const dot = card.querySelector('.dot');
   if (dot) { live ? dot.classList.remove('dot-dead') : dot.classList.add('dot-dead'); }
 
-  // Return value
-  const retEl = card.querySelector('[data-return]');
+  const retEl  = card.querySelector('[data-return]');
   const retPct = parseFloat(p.total_return_pct) || 0;
   if (retEl) {
     retEl.textContent = fmtPct(retPct);
     retEl.className   = 'card-stat-value ' + colorClass(retPct);
   }
 
-  // Portfolio value
   const statVals = card.querySelectorAll('.card-stat-value');
   if (statVals[0]) statVals[0].textContent = fmt$(p.total_value);
 
-  // Tick / remaining
   const tickEl = card.querySelector('[data-tick]');
   if (tickEl) {
     tickEl.textContent = live
@@ -905,14 +917,12 @@ function updateInstanceCard(inst) {
       : 'Session ended';
   }
 
-  // Trades
   const tradesEl = card.querySelector('[data-trades]');
   const winRate  = parseFloat(m.win_rate_pct) || 0;
   if (tradesEl) {
     tradesEl.textContent = `${p.total_trades} trades (${p.sell_trades} sells) · Win ${winRate.toFixed(1)}%`;
   }
 
-  // Sparkline
   if (chart) {
     const d = inst.sparkline || [];
     chart.data.labels           = d.map((_, i) => i);
@@ -921,7 +931,6 @@ function updateInstanceCard(inst) {
   }
 }
 
-// ─── Main poll loop ──────────────────────────────────────────────────────────
 async function pollInstances() {
   let instances;
   try {
@@ -930,8 +939,8 @@ async function pollInstances() {
     instances = await res.json();
   } catch { scheduleNext(); return; }
 
-  const grid      = document.getElementById('instances-grid');
-  const emptyEl   = document.getElementById('empty-state');
+  const grid         = document.getElementById('instances-grid');
+  const emptyEl      = document.getElementById('empty-state');
   const liveCountEl  = document.getElementById('live-count');
   const totalCountEl = document.getElementById('total-count');
   const lastRefEl    = document.getElementById('last-refresh');
@@ -992,20 +1001,16 @@ def instance_detail(name: str):
 
 
 # ---------------------------------------------------------------------------
-# Public helper: start Flask in a daemon thread (called from main.py)
+# Public helper: start Flask in a daemon thread (called from agent main.py)
 # ---------------------------------------------------------------------------
 
 def start_in_thread(host: str = "127.0.0.1", port: int = 5000) -> None:
     """
     Launch the Flask dev server in a background daemon thread.
 
-    Being a daemon thread means it dies automatically when the main program exits —
-    no need to manually shut it down.
-
     Raises OSError if the port is already in use.
     """
     import socket
-    # Quick pre-check so callers can catch the error before starting the thread
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -1019,15 +1024,14 @@ def start_in_thread(host: str = "127.0.0.1", port: int = 5000) -> None:
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    # Brief pause to let Flask start up before the caller prints the banner
     time.sleep(0.3)
     print(f"\nDashboard running at → http://{host}:{port}")
     print("Open that URL in your browser. It refreshes every second.\n")
 
 
 if __name__ == "__main__":
-    # Allow running standalone: python dashboard.py
+    # Allow running standalone: python shared/dashboard.py
     print("Starting dashboard server (standalone mode)...")
-    print("Make sure the paper trader is running in another terminal.")
+    print("Discovering state files from all *_agent/data/ directories...")
     _redirect_werkzeug_to_file()
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)

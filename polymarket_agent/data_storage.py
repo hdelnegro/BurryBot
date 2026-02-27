@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from config import DATA_DIR
-from models import Market, PriceBar
+from shared.models import Market, PriceBar
 
 
 # ---------------------------------------------------------------------------

@@ -231,10 +231,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
     :root {
-      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
-      --text: #e2e8f0; --muted: #718096; --green: #48bb78;
-      --red: #fc8181; --yellow: #f6e05e; --blue: #63b3ed;
-      --purple: #b794f4; --accent: #667eea;
+      --bg: #000000; --surface: #111111; --border: #1e1e1e;
+      --text: #ffffff; --muted: #707070; --green: #4af6c3;
+      --red: #ff433d; --yellow: #fb8b1e; --blue: #0068ff;
+      --purple: #b794f4; --accent: #ff8c00;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
@@ -243,13 +243,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: var(--surface); border-bottom: 1px solid var(--border);
       padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;
     }
-    header h1 { font-size: 16px; color: var(--blue); letter-spacing: 1px; }
+    header h1 { font-size: 16px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; }
     .back-link { color: var(--muted); text-decoration: none; font-size: 12px; margin-right: 12px; }
-    .back-link:hover { color: var(--blue); }
+    .back-link:hover { color: var(--accent); }
     #status-pill {
       display: flex; align-items: center; gap: 8px;
       background: var(--bg); border: 1px solid var(--border);
-      padding: 5px 12px; border-radius: 20px; font-size: 11px; color: var(--muted);
+      padding: 5px 12px; border-radius: 2px; font-size: 11px; color: var(--muted);
     }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green);
            animation: pulse 2s infinite; flex-shrink: 0; }
@@ -261,7 +261,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
     .card {
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: 8px; padding: 14px 16px;
+      border-radius: 2px; padding: 14px 16px;
     }
     .card .label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 8px; }
     .card .value { font-size: 22px; font-weight: 700; }
@@ -274,7 +274,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     .panel {
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: 8px; padding: 16px;
+      border-radius: 2px; padding: 16px;
     }
     .panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
                 color: var(--muted); margin-bottom: 12px; }
@@ -285,7 +285,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     th { font-size: 10px; text-transform: uppercase; letter-spacing: .6px;
          color: var(--muted); padding: 4px 8px; text-align: left;
          border-bottom: 1px solid var(--border); }
-    td { padding: 6px 8px; border-bottom: 1px solid #1e2130; vertical-align: top; }
+    td { padding: 6px 8px; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
     tr:last-child td { border-bottom: none; }
     tr:hover td { background: rgba(255,255,255,.03); }
 
@@ -293,9 +293,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       display: inline-block; padding: 2px 7px; border-radius: 4px;
       font-size: 10px; font-weight: 700; letter-spacing: .5px;
     }
-    .badge-buy  { background: rgba(72,187,120,.2); color: var(--green); }
-    .badge-sell { background: rgba(252,129,129,.2); color: var(--red); }
-    .badge-hold { background: rgba(113,128,150,.15); color: var(--muted); }
+    .badge-buy  { background: rgba(74,246,195,.15); color: var(--green); }
+    .badge-sell { background: rgba(255,67,61,.15);  color: var(--red); }
+    .badge-hold { background: rgba(112,112,112,.15); color: var(--muted); }
 
     .reason-text { color: var(--muted); font-size: 11px; margin-top: 2px; }
 
@@ -310,7 +310,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     #session-ended-banner {
       display: none;
-      background: rgba(252,129,129,.12); border-bottom: 1px solid rgba(252,129,129,.4);
+      background: rgba(255,67,61,.10); border-bottom: 1px solid rgba(255,67,61,.35);
       color: var(--red); padding: 8px 24px; font-size: 12px; text-align: center;
       letter-spacing: .4px;
     }
@@ -426,8 +426,8 @@ try {
         {
           label: 'Portfolio Value ($)',
           data: [],
-          borderColor: '#667eea',
-          backgroundColor: 'rgba(102,126,234,0.12)',
+          borderColor: '#ff8c00',
+          backgroundColor: 'rgba(255,140,0,0.10)',
           borderWidth: 2,
           pointRadius: 0,
           pointHoverRadius: 4,
@@ -460,8 +460,8 @@ try {
         x: { ticks: { color: '#718096', font: { size: 10 } }, grid: { color: '#1e2130' } },
         y: {
           grace: '5%',
-          ticks: { color: '#718096', font: { size: 10 }, callback: v => '$' + v.toFixed(2) },
-          grid: { color: '#1e2130' }
+          ticks: { color: '#707070', font: { size: 10 }, callback: v => '$' + v.toFixed(2) },
+          grid: { color: '#1a1a1a' }
         }
       }
     }
@@ -673,10 +673,10 @@ OVERVIEW_HTML = """<!DOCTYPE html>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
     :root {
-      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
-      --text: #e2e8f0; --muted: #718096; --green: #48bb78;
-      --red: #fc8181; --yellow: #f6e05e; --blue: #63b3ed;
-      --purple: #b794f4; --accent: #667eea;
+      --bg: #000000; --surface: #111111; --border: #1e1e1e;
+      --text: #ffffff; --muted: #707070; --green: #4af6c3;
+      --red: #ff433d; --yellow: #fb8b1e; --blue: #0068ff;
+      --purple: #b794f4; --accent: #ff8c00;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
@@ -685,7 +685,7 @@ OVERVIEW_HTML = """<!DOCTYPE html>
       background: var(--surface); border-bottom: 1px solid var(--border);
       padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;
     }
-    header h1 { font-size: 16px; color: var(--blue); letter-spacing: 1px; }
+    header h1 { font-size: 16px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; }
     #header-right { display: flex; align-items: center; gap: 16px; }
     #instance-counts { font-size: 11px; color: var(--muted); }
     #instance-counts span { color: var(--text); }
@@ -713,11 +713,12 @@ OVERVIEW_HTML = """<!DOCTYPE html>
     .instance-card {
       display: block; text-decoration: none; color: inherit;
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: 10px; padding: 16px;
+      border-radius: 2px; padding: 16px;
       transition: border-color .15s, box-shadow .15s;
     }
-    .instance-card:hover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-    .instance-card.dead  { opacity: 0.6; border-color: rgba(252,129,129,.4); }
+    .instance-card:hover { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(255,140,0,0.4); }
+    .instance-card.live  { border-left: 2px solid var(--accent); }
+    .instance-card.dead  { opacity: 0.55; border-color: #2a2a2a; }
 
     .card-header {
       display: flex; align-items: center; justify-content: space-between;
@@ -731,7 +732,7 @@ OVERVIEW_HTML = """<!DOCTYPE html>
 
     /* Platform badge pill */
     .badge-platform {
-      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      display: inline-block; padding: 2px 8px; border-radius: 2px;
       font-size: 9px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase;
     }
     .badge-platform-polymarket { background: rgba(99,179,237,.15); color: #63b3ed; }
@@ -814,8 +815,8 @@ function createSparkChart(canvas, data) {
       labels: data.map((_, i) => i),
       datasets: [{
         data: data,
-        borderColor: '#667eea',
-        backgroundColor: 'rgba(102,126,234,0.12)',
+        borderColor: '#ff8c00',
+        backgroundColor: 'rgba(255,140,0,0.10)',
         borderWidth: 1.5,
         pointRadius: 0,
         tension: 0.3,
@@ -841,7 +842,7 @@ function createInstanceCard(inst) {
   const live = inst.is_live;
 
   const a = document.createElement('a');
-  a.className = 'instance-card' + (live ? '' : ' dead');
+  a.className = 'instance-card' + (live ? ' live' : ' dead');
   a.href      = '/instance/' + inst.name;
 
   const startStr  = inst.session_start ? timeLabel(inst.session_start) : '—';
@@ -904,8 +905,8 @@ function updateInstanceCard(inst) {
   const m    = inst.metrics;
   const live = inst.is_live;
 
-  if (live) card.classList.remove('dead');
-  else       card.classList.add('dead');
+  if (live) { card.classList.add('live'); card.classList.remove('dead'); }
+  else       { card.classList.remove('live'); card.classList.add('dead'); }
   const dot = card.querySelector('.dot');
   if (dot) { live ? dot.classList.remove('dot-dead') : dot.classList.add('dot-dead'); }
 

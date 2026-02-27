@@ -233,70 +233,80 @@ class PaperTrader:
         for m in expired:
             print(f"    x {m.question[:65]}")
             self._expired_token_ids.add(m.yes_token_id)
+            if m.no_token_id:
+                self._expired_token_ids.add(m.no_token_id)
             self.markets = [x for x in self.markets if x.yes_token_id != m.yes_token_id]
 
-            pos = self.portfolio.positions.get(m.yes_token_id)
-            if pos:
-                price = final_prices.get(m.yes_token_id, pos.avg_cost)
-                sell_signal = Signal(
-                    action="SELL", token_id=m.yes_token_id, outcome=pos.outcome,
-                    price=price, reason="Market expired — forced close", confidence=1.0,
-                )
-                trade = self.portfolio.execute_sell(
-                    signal=sell_signal, market_slug=m.slug, timestamp=now_utc,
-                )
-                if trade:
-                    pnl_sign = "+" if trade.pnl >= 0 else ""
-                    print(f"      -> Position closed: {pnl_sign}${trade.pnl:.2f} PnL")
+            for token_id in [m.yes_token_id, m.no_token_id]:
+                if not token_id:
+                    continue
+                pos = self.portfolio.positions.get(token_id)
+                if pos:
+                    price = final_prices.get(token_id, pos.avg_cost)
+                    sell_signal = Signal(
+                        action="SELL", token_id=token_id, outcome=pos.outcome,
+                        price=price, reason="Market expired — forced close", confidence=1.0,
+                    )
+                    trade = self.portfolio.execute_sell(
+                        signal=sell_signal, market_slug=m.slug, timestamp=now_utc,
+                    )
+                    if trade:
+                        pnl_sign = "+" if trade.pnl >= 0 else ""
+                        print(f"      -> Position closed ({pos.outcome}): {pnl_sign}${trade.pnl:.2f} PnL")
 
-            hist = self.price_history.get(m.yes_token_id, [])
-            if len(hist) > 100:
-                self.price_history[m.yes_token_id] = hist[-100:]
+            for token_id in [m.yes_token_id, m.no_token_id]:
+                if not token_id:
+                    continue
+                hist = self.price_history.get(token_id, [])
+                if len(hist) > 100:
+                    self.price_history[token_id] = hist[-100:]
 
         sys.stdout.flush()
 
     def _load_history_for_markets(self, markets: List[Market]) -> None:
-        """Load initial hourly price history for a list of markets."""
+        """Load initial hourly price history for a list of markets (YES and NO tokens)."""
         import requests
         from config import CLOB_API_URL, REQUEST_TIMEOUT_SECONDS, PRICE_HISTORY_INTERVAL
 
         for market in markets:
-            token_id = market.yes_token_id
-            if token_id in self._known_token_ids:
-                continue
+            for token_id, outcome_label in [
+                (market.yes_token_id, "YES"),
+                (market.no_token_id,  "NO"),
+            ]:
+                if not token_id or token_id in self._known_token_ids:
+                    continue
 
-            try:
-                response = requests.get(
-                    CLOB_API_URL,
-                    params={"market": token_id, "interval": PRICE_HISTORY_INTERVAL, "fidelity": 60},
-                    timeout=REQUEST_TIMEOUT_SECONDS,
-                )
-                response.raise_for_status()
-                raw = response.json().get("history", [])
-                bars = [
-                    PriceBar(
-                        token_id  = token_id,
-                        timestamp = datetime.utcfromtimestamp(e["t"]),
-                        price     = float(e["p"]),
+                try:
+                    response = requests.get(
+                        CLOB_API_URL,
+                        params={"market": token_id, "interval": PRICE_HISTORY_INTERVAL, "fidelity": 60},
+                        timeout=REQUEST_TIMEOUT_SECONDS,
                     )
-                    for e in raw
-                ]
-                bars.sort(key=lambda b: b.timestamp)
-            except Exception:
-                bars = []
+                    response.raise_for_status()
+                    raw = response.json().get("history", [])
+                    bars = [
+                        PriceBar(
+                            token_id  = token_id,
+                            timestamp = datetime.utcfromtimestamp(e["t"]),
+                            price     = float(e["p"]),
+                        )
+                        for e in raw
+                    ]
+                    bars.sort(key=lambda b: b.timestamp)
+                except Exception:
+                    bars = []
 
-            self.price_history.setdefault(token_id, [])
-            existing_ts = {b.timestamp for b in self.price_history[token_id]}
-            new_bars = [b for b in bars if b.timestamp not in existing_ts]
-            self.price_history[token_id].extend(new_bars)
-            self.price_history[token_id].sort(key=lambda b: b.timestamp)
+                self.price_history.setdefault(token_id, [])
+                existing_ts = {b.timestamp for b in self.price_history[token_id]}
+                new_bars = [b for b in bars if b.timestamp not in existing_ts]
+                self.price_history[token_id].extend(new_bars)
+                self.price_history[token_id].sort(key=lambda b: b.timestamp)
 
-            n = len(self.price_history[token_id])
-            tag = "(new)" if token_id not in self._known_token_ids else "(updated)"
-            print(f"  {market.slug[:45]:45s} {tag}: {n} bars")
-            sys.stdout.flush()
+                n = len(self.price_history[token_id])
+                print(f"  {market.slug[:42]:42s} [{outcome_label}]: {n} bars")
+                sys.stdout.flush()
 
-            self._known_token_ids.add(token_id)
+                self._known_token_ids.add(token_id)
 
     def _get_latest_prices(self) -> Dict[str, float]:
         prices = {}
@@ -306,6 +316,8 @@ class PaperTrader:
         return prices
 
     def _run_tick(self) -> None:
+        from dataclasses import replace as dc_replace
+
         self.tick_count += 1
         now = datetime.utcnow()
         print(f"\n{'='*55}")
@@ -316,106 +328,123 @@ class PaperTrader:
         current_prices: Dict[str, float] = {}
 
         for market in self.markets:
-            token_id   = market.yes_token_id
-            latest_bar = self._fetch_latest_price(token_id)
+            for token_id, outcome_label in [
+                (market.yes_token_id, "YES"),
+                (market.no_token_id,  "NO"),
+            ]:
+                if not token_id:
+                    continue
 
-            existing = self.price_history.get(token_id, [])
+                latest_bar = self._fetch_latest_price(token_id)
+                existing   = self.price_history.get(token_id, [])
 
-            if latest_bar is None:
-                if existing:
-                    current_prices[token_id] = existing[-1].price
-                    print(f"  {market.slug[:38]:38s} | price={existing[-1].price:.4f} "
-                          f"[no new bar]")
-                else:
-                    print(f"  {market.slug[:38]:38s} | no data")
+                if latest_bar is None:
+                    if existing:
+                        current_prices[token_id] = existing[-1].price
+                        print(f"  {market.slug[:35]:35s} [{outcome_label}] | "
+                              f"price={existing[-1].price:.4f} [no new bar]")
+                    else:
+                        print(f"  {market.slug[:35]:35s} [{outcome_label}] | no data")
+                    sys.stdout.flush()
+                    continue
+
+                history = self.price_history.setdefault(token_id, [])
+                prev_price = history[-1].price if history else latest_bar.price
+                history.append(latest_bar)
+                current_prices[token_id] = latest_bar.price
+
+                delta = latest_bar.price - prev_price
+                arrow = "^" if delta > 0 else ("v" if delta < 0 else "-")
+                print(f"  {market.slug[:35]:35s} [{outcome_label}] | "
+                      f"price={latest_bar.price:.4f} {arrow}{abs(delta):.4f} | {len(history)} bars")
                 sys.stdout.flush()
-                continue
 
-            history = self.price_history.setdefault(token_id, [])
-            prev_price = history[-1].price if history else latest_bar.price
-            history.append(latest_bar)
-            current_prices[token_id] = latest_bar.price
+                if len(history) < 2:
+                    print(f"    -> Skipping: not enough history yet")
+                    sys.stdout.flush()
+                    continue
 
-            delta = latest_bar.price - prev_price
-            arrow = "^" if delta > 0 else ("v" if delta < 0 else "-")
-            print(f"  {market.slug[:38]:38s} | price={latest_bar.price:.4f} "
-                  f"{arrow}{abs(delta):.4f} | {len(history)} bars")
-            sys.stdout.flush()
-
-            if len(history) < 2:
-                print(f"    -> Skipping: not enough history yet")
-                sys.stdout.flush()
-                continue
-
-            df = pd.DataFrame(
-                {"price": [b.price for b in history[:-1]]},
-                index=[b.timestamp for b in history[:-1]],
-            )
-            df.index = pd.DatetimeIndex(df.index)
-
-            sig = self.strategy.generate_signal(
-                token_id      = token_id,
-                price_history = df,
-                current_price = latest_bar.price,
-                current_time  = latest_bar.timestamp,
-            )
-
-            action_label = {"BUY": "BUY", "SELL": "SELL", "HOLD": "HOLD"}.get(sig.action, sig.action)
-            print(f"    -> Signal: {action_label} | conf={sig.confidence:.0%} | {sig.reason}")
-            sys.stdout.flush()
-
-            self.latest_signals[token_id] = {
-                "slug":       market.slug,
-                "question":   market.question,
-                "price":      latest_bar.price,
-                "signal":     sig.action,
-                "reason":     sig.reason,
-                "confidence": sig.confidence,
-                "updated_at": latest_bar.timestamp.isoformat(),
-            }
-
-            if sig.action == "HOLD":
-                continue
-
-            allowed, trade_size, risk_reason = self.risk_manager.check_signal(
-                signal         = sig,
-                portfolio      = self.portfolio,
-                current_prices = current_prices,
-            )
-
-            if not allowed:
-                print(f"    -> Risk manager: BLOCKED — {risk_reason}")
-                sys.stdout.flush()
-                continue
-
-            print(f"    -> Risk manager: APPROVED — {risk_reason}")
-
-            if sig.action == "BUY":
-                trade = self.portfolio.execute_buy(
-                    signal          = sig,
-                    market_slug     = market.slug,
-                    trade_size_usdc = trade_size,
-                    timestamp       = now,
+                df = pd.DataFrame(
+                    {"price": [b.price for b in history[:-1]]},
+                    index=[b.timestamp for b in history[:-1]],
                 )
-                if trade:
-                    print(f"    *** TRADE EXECUTED: BUY {trade.shares:.2f} shares "
-                          f"@ ${trade.price:.4f}  |  cost=${trade.total_cost:.2f}  "
-                          f"|  fee=${trade.fee:.4f}")
-                    self.strategy.on_trade_executed(trade)
+                df.index = pd.DatetimeIndex(df.index)
 
-            elif sig.action == "SELL":
-                trade = self.portfolio.execute_sell(
-                    signal      = sig,
-                    market_slug = market.slug,
-                    timestamp   = now,
+                sig = self.strategy.generate_signal(
+                    token_id      = token_id,
+                    price_history = df,
+                    current_price = latest_bar.price,
+                    current_time  = latest_bar.timestamp,
                 )
-                if trade:
-                    pnl_sign = "+" if trade.pnl >= 0 else ""
-                    print(f"    *** TRADE EXECUTED: SELL {trade.shares:.2f} shares "
-                          f"@ ${trade.price:.4f}  |  PnL={pnl_sign}${trade.pnl:.2f}")
-                    self.strategy.on_trade_executed(trade)
 
-            sys.stdout.flush()
+                # Override outcome to match the token side we're analyzing
+                sig = dc_replace(sig, outcome=outcome_label)
+
+                action_label = {"BUY": "BUY", "SELL": "SELL", "HOLD": "HOLD"}.get(sig.action, sig.action)
+                print(f"    -> Signal: {action_label} | conf={sig.confidence:.0%} | {sig.reason}")
+                sys.stdout.flush()
+
+                self.latest_signals[token_id] = {
+                    "slug":       market.slug,
+                    "question":   market.question,
+                    "price":      latest_bar.price,
+                    "signal":     sig.action,
+                    "outcome":    outcome_label,
+                    "reason":     sig.reason,
+                    "confidence": sig.confidence,
+                    "updated_at": latest_bar.timestamp.isoformat(),
+                }
+
+                if sig.action == "HOLD":
+                    continue
+
+                # Block BUY if we already hold the opposite side of this market
+                if sig.action == "BUY":
+                    opposite = market.no_token_id if token_id == market.yes_token_id else market.yes_token_id
+                    if opposite and opposite in self.portfolio.positions:
+                        print(f"    -> Blocked: already hold opposite side of this market")
+                        sys.stdout.flush()
+                        continue
+
+                allowed, trade_size, risk_reason = self.risk_manager.check_signal(
+                    signal         = sig,
+                    portfolio      = self.portfolio,
+                    current_prices = current_prices,
+                )
+
+                if not allowed:
+                    print(f"    -> Risk manager: BLOCKED — {risk_reason}")
+                    sys.stdout.flush()
+                    continue
+
+                print(f"    -> Risk manager: APPROVED — {risk_reason}")
+
+                if sig.action == "BUY":
+                    trade = self.portfolio.execute_buy(
+                        signal          = sig,
+                        market_slug     = market.slug,
+                        trade_size_usdc = trade_size,
+                        timestamp       = now,
+                    )
+                    if trade:
+                        print(f"    *** TRADE EXECUTED: BUY {trade.shares:.2f} shares "
+                              f"@ ${trade.price:.4f}  |  cost=${trade.total_cost:.2f}  "
+                              f"|  fee=${trade.fee:.4f}")
+                        self.strategy.on_trade_executed(trade)
+
+                elif sig.action == "SELL":
+                    trade = self.portfolio.execute_sell(
+                        signal      = sig,
+                        market_slug = market.slug,
+                        timestamp   = now,
+                    )
+                    if trade:
+                        pnl_sign = "+" if trade.pnl >= 0 else ""
+                        print(f"    *** TRADE EXECUTED: SELL {trade.shares:.2f} shares "
+                              f"@ ${trade.price:.4f}  |  PnL={pnl_sign}${trade.pnl:.2f}")
+                        self.strategy.on_trade_executed(trade)
+
+                sys.stdout.flush()
 
         total_val = self.portfolio.total_value(current_prices)
         self.equity_curve.append(total_val)
@@ -589,13 +618,15 @@ class FiveMinPaperTrader(PaperTrader):
     - Market is identified by computing the current 5-min interval slug from the clock
     - Transitions to the next market automatically every 5 minutes
     - Strategy runs on a cross-market synthetic history (one PriceBar per resolved market)
-    - Force-exits any open Up position 30 seconds before each market closes
+      for both the Up (YES) and Down (NO) tokens
+    - Force-exits any open position on either side 30 seconds before each market closes
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._current_interval_start: int = 0
         self._cross_market_history: List[PriceBar] = []
+        self._cross_market_history_no: List[PriceBar] = []
         self._current_market: Optional[Market] = None
 
     # ------------------------------------------------------------------
@@ -673,19 +704,24 @@ class FiveMinPaperTrader(PaperTrader):
         if current_interval == self._current_interval_start and not initial:
             return  # Same market, no change
 
-        # Market changed (or first call): record previous market's last price
+        # Market changed (or first call): record previous market's closing prices
         if not initial and self._current_market:
-            prev_token_id = self._current_market.yes_token_id
-            prev_bars = self.price_history.get(prev_token_id, [])
-            if prev_bars:
-                closing_bar = PriceBar(
-                    token_id  = "btc_5min_cross_market",
-                    timestamp = prev_bars[-1].timestamp,
-                    price     = prev_bars[-1].price,
-                )
-                self._cross_market_history.append(closing_bar)
-                print(f"  [5min] Market closed. Cross-market history: "
-                      f"{len(self._cross_market_history)} bars")
+            for token_id, hist_list, label in [
+                (self._current_market.yes_token_id, self._cross_market_history,    "btc_5min_cross_market"),
+                (self._current_market.no_token_id,  self._cross_market_history_no, "btc_5min_cross_market_no"),
+            ]:
+                if not token_id:
+                    continue
+                prev_bars = self.price_history.get(token_id, [])
+                if prev_bars:
+                    hist_list.append(PriceBar(
+                        token_id  = label,
+                        timestamp = prev_bars[-1].timestamp,
+                        price     = prev_bars[-1].price,
+                    ))
+            print(f"  [5min] Market closed. Cross-market history: "
+                  f"{len(self._cross_market_history)} Up / "
+                  f"{len(self._cross_market_history_no)} Down bars")
 
         market = fetch_current_5min_market()
         if market is None or market.is_resolved:
@@ -701,7 +737,8 @@ class FiveMinPaperTrader(PaperTrader):
             self._load_history_for_markets([market])
 
         print(f"  [5min] Tracking market: {market.question[:70]}")
-        print(f"  [5min] End: {market.end_date}  |  Up token: {market.yes_token_id[:12]}...")
+        print(f"  [5min] End: {market.end_date}  |  Up: {market.yes_token_id[:12]}...  "
+              f"|  Down: {market.no_token_id[:12] if market.no_token_id else 'n/a'}...")
         sys.stdout.flush()
 
     # ------------------------------------------------------------------
@@ -712,10 +749,14 @@ class FiveMinPaperTrader(PaperTrader):
         """
         Single tick for 5-min mode.
 
-        1. Check if we're within EXIT_BUFFER_SECONDS of market close → force-sell.
-        2. Otherwise fetch latest price, build cross-market history DataFrame,
-           run strategy, execute signal through risk manager and portfolio.
+        1. Check if we're within EXIT_BUFFER_SECONDS of market close → force-sell both sides.
+        2. Otherwise run strategy on BOTH Up (yes) and Down (no) tokens:
+           - Up  token uses the cross-market synthetic history (falls back to intra-market).
+           - Down token uses its own intra-market history only.
+           Outcome is overridden to YES/NO per token; BUY is blocked if the opposite
+           side is already held.
         """
+        from dataclasses import replace as dc_replace
         from config import FIVE_MIN_INTERVAL_SECONDS, FIVE_MIN_EXIT_BUFFER_SECONDS
 
         self.tick_count += 1
@@ -728,29 +769,35 @@ class FiveMinPaperTrader(PaperTrader):
         print(f"  Interval: {seconds_into_interval}s elapsed | {seconds_remaining}s remaining")
         sys.stdout.flush()
 
-        # ---- pre-resolution force-exit ----
+        # ---- pre-resolution force-exit: close any open position on either side ----
         if seconds_remaining <= FIVE_MIN_EXIT_BUFFER_SECONDS and self.markets:
             current_prices = self._get_latest_prices()
             market = self.markets[0]
-            token_id = market.yes_token_id
-            pos = self.portfolio.positions.get(token_id)
-            if pos:
-                price = current_prices.get(token_id, pos.avg_cost)
-                print(f"  [5min] Pre-resolution exit: {seconds_remaining}s left — force-selling")
-                sell_signal = Signal(
-                    action     = "SELL",
-                    token_id   = token_id,
-                    outcome    = pos.outcome,
-                    price      = price,
-                    reason     = f"Pre-resolution exit ({seconds_remaining}s left)",
-                    confidence = 1.0,
-                )
-                trade = self.portfolio.execute_sell(
-                    signal=sell_signal, market_slug=market.slug, timestamp=now,
-                )
-                if trade:
-                    pnl_sign = "+" if trade.pnl >= 0 else ""
-                    print(f"    -> Closed: {pnl_sign}${trade.pnl:.2f} PnL")
+            for token_id, side_label in [
+                (market.yes_token_id, "Up"),
+                (market.no_token_id,  "Down"),
+            ]:
+                if not token_id:
+                    continue
+                pos = self.portfolio.positions.get(token_id)
+                if pos:
+                    price = current_prices.get(token_id, pos.avg_cost)
+                    print(f"  [5min] Pre-resolution exit [{side_label}]: "
+                          f"{seconds_remaining}s left — force-selling")
+                    sell_signal = Signal(
+                        action     = "SELL",
+                        token_id   = token_id,
+                        outcome    = pos.outcome,
+                        price      = price,
+                        reason     = f"Pre-resolution exit ({seconds_remaining}s left)",
+                        confidence = 1.0,
+                    )
+                    trade = self.portfolio.execute_sell(
+                        signal=sell_signal, market_slug=market.slug, timestamp=now,
+                    )
+                    if trade:
+                        pnl_sign = "+" if trade.pnl >= 0 else ""
+                        print(f"    -> Closed [{side_label}]: {pnl_sign}${trade.pnl:.2f} PnL")
             # Skip strategy signal this tick; let market transition on next refresh
             total_val = self.portfolio.total_value(self._get_latest_prices())
             self.equity_curve.append(total_val)
@@ -760,68 +807,86 @@ class FiveMinPaperTrader(PaperTrader):
             return
 
         market = self.markets[0]
-        token_id = market.yes_token_id
+        current_prices: Dict[str, float] = {}
 
-        # ---- fetch latest intra-market price bar ----
-        latest_bar = self._fetch_latest_price(token_id)
-        if latest_bar:
-            history = self.price_history.setdefault(token_id, [])
-            prev_price = history[-1].price if history else latest_bar.price
-            history.append(latest_bar)
-            delta = latest_bar.price - prev_price
-            arrow = "^" if delta > 0 else ("v" if delta < 0 else "-")
-            print(f"  Up token: {latest_bar.price:.4f} {arrow}{abs(delta):.4f} "
-                  f"| {len(history)} intra-market bars")
-            current_price = latest_bar.price
-        else:
-            intra = self.price_history.get(token_id, [])
-            current_price = intra[-1].price if intra else 0.5
-            print(f"  Up token: {current_price:.4f} [no new bar]")
-        sys.stdout.flush()
+        for token_id, outcome_label, side_label in [
+            (market.yes_token_id, "YES", "Up"),
+            (market.no_token_id,  "NO",  "Down"),
+        ]:
+            if not token_id:
+                continue
 
-        # ---- choose history for strategy ----
-        # Use cross-market synthetic series once we have >= 2 bars;
-        # fall back to intra-market bars during the first warmup market.
-        history_to_use = self._cross_market_history
-        if len(history_to_use) < 2:
-            intra = self.price_history.get(token_id, [])
-            history_to_use = intra
+            # ---- fetch latest intra-market price bar ----
+            latest_bar = self._fetch_latest_price(token_id)
+            if latest_bar:
+                history = self.price_history.setdefault(token_id, [])
+                prev_price = history[-1].price if history else latest_bar.price
+                history.append(latest_bar)
+                delta = latest_bar.price - prev_price
+                arrow = "^" if delta > 0 else ("v" if delta < 0 else "-")
+                print(f"  {side_label} token: {latest_bar.price:.4f} {arrow}{abs(delta):.4f} "
+                      f"| {len(history)} intra-market bars")
+                current_price = latest_bar.price
+            else:
+                intra = self.price_history.get(token_id, [])
+                current_price = intra[-1].price if intra else 0.5
+                print(f"  {side_label} token: {current_price:.4f} [no new bar]")
+            sys.stdout.flush()
 
-        if len(history_to_use) < 2:
-            print(f"    -> Waiting for history ({len(history_to_use)} bars)")
-            total_val = self.portfolio.total_value(self._get_latest_prices())
-            self.equity_curve.append(total_val)
-            return
+            current_prices[token_id] = current_price
 
-        df = pd.DataFrame(
-            {"price": [b.price for b in history_to_use[:-1]]},
-            index=[b.timestamp for b in history_to_use[:-1]],
-        )
-        df.index = pd.DatetimeIndex(df.index)
+            # ---- choose history for strategy ----
+            # Both tokens use their own cross-market synthetic series (one closing price
+            # per resolved market), falling back to intra-market during the warmup period.
+            cross = self._cross_market_history if outcome_label == "YES" else self._cross_market_history_no
+            history_to_use = cross if len(cross) >= 2 else self.price_history.get(token_id, [])
 
-        sig = self.strategy.generate_signal(
-            token_id      = token_id,
-            price_history = df,
-            current_price = current_price,
-            current_time  = now,
-        )
+            if len(history_to_use) < 2:
+                print(f"    -> Waiting for history ({len(history_to_use)} bars)")
+                sys.stdout.flush()
+                continue
 
-        print(f"    -> Signal: {sig.action} | conf={sig.confidence:.0%} | {sig.reason}")
-        sys.stdout.flush()
+            df = pd.DataFrame(
+                {"price": [b.price for b in history_to_use[:-1]]},
+                index=[b.timestamp for b in history_to_use[:-1]],
+            )
+            df.index = pd.DatetimeIndex(df.index)
 
-        self.latest_signals[token_id] = {
-            "slug":       market.slug,
-            "question":   market.question,
-            "price":      current_price,
-            "signal":     sig.action,
-            "reason":     sig.reason,
-            "confidence": sig.confidence,
-            "updated_at": now.isoformat(),
-        }
+            sig = self.strategy.generate_signal(
+                token_id      = token_id,
+                price_history = df,
+                current_price = current_price,
+                current_time  = now,
+            )
 
-        current_prices = {token_id: current_price}
+            sig = dc_replace(sig, outcome=outcome_label)
 
-        if sig.action != "HOLD":
+            print(f"    -> Signal [{outcome_label}]: {sig.action} | "
+                  f"conf={sig.confidence:.0%} | {sig.reason}")
+            sys.stdout.flush()
+
+            self.latest_signals[token_id] = {
+                "slug":       market.slug,
+                "question":   market.question,
+                "price":      current_price,
+                "signal":     sig.action,
+                "outcome":    outcome_label,
+                "reason":     sig.reason,
+                "confidence": sig.confidence,
+                "updated_at": now.isoformat(),
+            }
+
+            if sig.action == "HOLD":
+                continue
+
+            # Block BUY if we already hold the opposite side of this market
+            if sig.action == "BUY":
+                opposite = market.no_token_id if token_id == market.yes_token_id else market.yes_token_id
+                if opposite and opposite in self.portfolio.positions:
+                    print(f"    -> Blocked: already hold opposite side of this market")
+                    sys.stdout.flush()
+                    continue
+
             allowed, trade_size, risk_reason = self.risk_manager.check_signal(
                 signal         = sig,
                 portfolio      = self.portfolio,
@@ -837,7 +902,8 @@ class FiveMinPaperTrader(PaperTrader):
                         timestamp       = now,
                     )
                     if trade:
-                        print(f"    *** BUY {trade.shares:.2f} shares @ ${trade.price:.4f}")
+                        print(f"    *** BUY [{outcome_label}] {trade.shares:.2f} shares "
+                              f"@ ${trade.price:.4f}")
                         self.strategy.on_trade_executed(trade)
                 elif sig.action == "SELL":
                     trade = self.portfolio.execute_sell(
@@ -847,12 +913,12 @@ class FiveMinPaperTrader(PaperTrader):
                     )
                     if trade:
                         pnl_sign = "+" if trade.pnl >= 0 else ""
-                        print(f"    *** SELL {trade.shares:.2f} shares @ ${trade.price:.4f} "
-                              f"| PnL={pnl_sign}${trade.pnl:.2f}")
+                        print(f"    *** SELL [{outcome_label}] {trade.shares:.2f} shares "
+                              f"@ ${trade.price:.4f} | PnL={pnl_sign}${trade.pnl:.2f}")
                         self.strategy.on_trade_executed(trade)
             else:
                 print(f"    -> Risk manager: BLOCKED — {risk_reason}")
-        sys.stdout.flush()
+            sys.stdout.flush()
 
         total_val = self.portfolio.total_value(current_prices)
         self.equity_curve.append(total_val)

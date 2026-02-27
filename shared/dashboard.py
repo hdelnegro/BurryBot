@@ -210,7 +210,9 @@ def api_instances():
                 "sell_trades":      p.get("sell_trades", 0),
             },
             "metrics": {
-                "win_rate_pct": m.get("win_rate_pct", 0),
+                "win_rate_pct":     m.get("win_rate_pct", 0),
+                "sharpe_ratio":     m.get("sharpe_ratio", 0),
+                "max_drawdown_pct": m.get("max_drawdown_pct", 0),
             },
             "sparkline": _downsample(data.get("equity_curve", []), 50),
         })
@@ -231,10 +233,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
     :root {
-      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
-      --text: #e2e8f0; --muted: #718096; --green: #48bb78;
-      --red: #fc8181; --yellow: #f6e05e; --blue: #63b3ed;
-      --purple: #b794f4; --accent: #667eea;
+      --bg: #000000; --surface: #111111; --border: #1e1e1e;
+      --text: #ffffff; --muted: #707070; --green: #4af6c3;
+      --red: #ff433d; --yellow: #fb8b1e; --blue: #0068ff;
+      --purple: #b794f4; --accent: #ff8c00;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
@@ -243,13 +245,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: var(--surface); border-bottom: 1px solid var(--border);
       padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;
     }
-    header h1 { font-size: 16px; color: var(--blue); letter-spacing: 1px; }
+    header h1 { font-size: 16px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; }
     .back-link { color: var(--muted); text-decoration: none; font-size: 12px; margin-right: 12px; }
-    .back-link:hover { color: var(--blue); }
+    .back-link:hover { color: var(--accent); }
     #status-pill {
       display: flex; align-items: center; gap: 8px;
       background: var(--bg); border: 1px solid var(--border);
-      padding: 5px 12px; border-radius: 20px; font-size: 11px; color: var(--muted);
+      padding: 5px 12px; border-radius: 2px; font-size: 11px; color: var(--muted);
     }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green);
            animation: pulse 2s infinite; flex-shrink: 0; }
@@ -261,7 +263,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
     .card {
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: 8px; padding: 14px 16px;
+      border-radius: 2px; padding: 14px 16px;
     }
     .card .label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 8px; }
     .card .value { font-size: 22px; font-weight: 700; }
@@ -274,7 +276,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     .panel {
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: 8px; padding: 16px;
+      border-radius: 2px; padding: 16px;
     }
     .panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
                 color: var(--muted); margin-bottom: 12px; }
@@ -285,7 +287,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     th { font-size: 10px; text-transform: uppercase; letter-spacing: .6px;
          color: var(--muted); padding: 4px 8px; text-align: left;
          border-bottom: 1px solid var(--border); }
-    td { padding: 6px 8px; border-bottom: 1px solid #1e2130; vertical-align: top; }
+    td { padding: 6px 8px; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
     tr:last-child td { border-bottom: none; }
     tr:hover td { background: rgba(255,255,255,.03); }
 
@@ -293,9 +295,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       display: inline-block; padding: 2px 7px; border-radius: 4px;
       font-size: 10px; font-weight: 700; letter-spacing: .5px;
     }
-    .badge-buy  { background: rgba(72,187,120,.2); color: var(--green); }
-    .badge-sell { background: rgba(252,129,129,.2); color: var(--red); }
-    .badge-hold { background: rgba(113,128,150,.15); color: var(--muted); }
+    .badge-buy  { background: rgba(74,246,195,.15); color: var(--green); }
+    .badge-sell { background: rgba(255,67,61,.15);  color: var(--red); }
+    .badge-hold { background: rgba(112,112,112,.15); color: var(--muted); }
 
     .reason-text { color: var(--muted); font-size: 11px; margin-top: 2px; }
 
@@ -310,7 +312,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     #session-ended-banner {
       display: none;
-      background: rgba(252,129,129,.12); border-bottom: 1px solid rgba(252,129,129,.4);
+      background: rgba(255,67,61,.10); border-bottom: 1px solid rgba(255,67,61,.35);
       color: var(--red); padding: 8px 24px; font-size: 12px; text-align: center;
       letter-spacing: .4px;
     }
@@ -426,8 +428,8 @@ try {
         {
           label: 'Portfolio Value ($)',
           data: [],
-          borderColor: '#667eea',
-          backgroundColor: 'rgba(102,126,234,0.12)',
+          borderColor: '#ff8c00',
+          backgroundColor: 'rgba(255,140,0,0.10)',
           borderWidth: 2,
           pointRadius: 0,
           pointHoverRadius: 4,
@@ -460,8 +462,8 @@ try {
         x: { ticks: { color: '#718096', font: { size: 10 } }, grid: { color: '#1e2130' } },
         y: {
           grace: '5%',
-          ticks: { color: '#718096', font: { size: 10 }, callback: v => '$' + v.toFixed(2) },
-          grid: { color: '#1e2130' }
+          ticks: { color: '#707070', font: { size: 10 }, callback: v => '$' + v.toFixed(2) },
+          grid: { color: '#1a1a1a' }
         }
       }
     }
@@ -673,10 +675,10 @@ OVERVIEW_HTML = """<!DOCTYPE html>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
     :root {
-      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
-      --text: #e2e8f0; --muted: #718096; --green: #48bb78;
-      --red: #fc8181; --yellow: #f6e05e; --blue: #63b3ed;
-      --purple: #b794f4; --accent: #667eea;
+      --bg: #000000; --surface: #111111; --border: #1e1e1e;
+      --text: #ffffff; --muted: #707070; --green: #4af6c3;
+      --red: #ff433d; --yellow: #fb8b1e; --blue: #0068ff;
+      --purple: #b794f4; --accent: #ff8c00;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
@@ -685,7 +687,7 @@ OVERVIEW_HTML = """<!DOCTYPE html>
       background: var(--surface); border-bottom: 1px solid var(--border);
       padding: 14px 24px; display: flex; align-items: center; justify-content: space-between;
     }
-    header h1 { font-size: 16px; color: var(--blue); letter-spacing: 1px; }
+    header h1 { font-size: 16px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; }
     #header-right { display: flex; align-items: center; gap: 16px; }
     #instance-counts { font-size: 11px; color: var(--muted); }
     #instance-counts span { color: var(--text); }
@@ -704,55 +706,67 @@ OVERVIEW_HTML = """<!DOCTYPE html>
     }
     #empty-state p { margin-top: 12px; font-size: 12px; }
 
-    #instances-grid {
+    .instances-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
       gap: 16px;
+    }
+
+    .section-wrap { margin-bottom: 36px; }
+    .section-header {
+      font-size: 10px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+      color: var(--accent); border-bottom: 1px solid var(--border);
+      padding-bottom: 8px; margin-bottom: 16px;
     }
 
     .instance-card {
       display: block; text-decoration: none; color: inherit;
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 10px; padding: 16px;
+      background: #ffffff; border: 1px solid #e8e8e8;
+      border-radius: 2px; padding: 16px;
       transition: border-color .15s, box-shadow .15s;
     }
-    .instance-card:hover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-    .instance-card.dead  { opacity: 0.6; border-color: rgba(252,129,129,.4); }
+    .instance-card:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(255,140,0,0.15); }
+    .instance-card.live  { border-left: 3px solid var(--accent); }
+    .instance-card.dead  { opacity: 0.6; border-color: #e0e0e0; }
 
     .card-header {
       display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
     }
-    .card-title {
-      display: flex; align-items: center; gap: 8px;
-    }
-    .card-name { font-size: 14px; font-weight: 700; color: var(--text); }
-    .card-arrow { color: var(--muted); font-size: 16px; }
+    .card-title { display: flex; align-items: center; gap: 8px; }
+    .card-name  { font-size: 14px; font-weight: 700; color: #111111; }
+    .card-arrow { color: #aaaaaa; font-size: 16px; }
 
     /* Platform badge pill */
     .badge-platform {
-      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      display: inline-block; padding: 2px 8px; border-radius: 2px;
       font-size: 9px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase;
     }
-    .badge-platform-polymarket { background: rgba(99,179,237,.15); color: #63b3ed; }
-    .badge-platform-kalshi     { background: rgba(154,205,50,.15);  color: #9acd32; }
-    .badge-platform-unknown    { background: rgba(113,128,150,.15); color: #718096; }
+    .badge-platform-polymarket { background: rgba(0,104,255,.1); color: #0068ff; }
+    .badge-platform-kalshi     { background: rgba(74,246,195,.15); color: #1aad7a; }
+    .badge-platform-unknown    { background: rgba(0,0,0,.07); color: #777777; }
 
-    .card-meta { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
+    .card-meta { font-size: 11px; color: #888888; margin-bottom: 10px; }
 
     .card-stats {
-      display: flex; justify-content: space-between;
-      margin-bottom: 10px;
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      gap: 4px; margin-bottom: 10px;
     }
-    .card-stat-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
-    .card-stat-value { font-size: 16px; font-weight: 700; margin-top: 2px; }
-    .pos  { color: var(--green); }
+    .card-stat-label { font-size: 9px; color: #999999; text-transform: uppercase; letter-spacing: .6px; }
+    .card-stat-value { font-size: 13px; font-weight: 700; margin-top: 2px; }
+    .pos  { color: #1aad7a; }
     .neg  { color: var(--red); }
-    .neu  { color: var(--text); }
+    .neu  { color: #111111; }
 
-    .sparkline-wrap { position: relative; height: 80px; margin-bottom: 10px; }
+    .sparkline-wrap { position: relative; height: 70px; margin-bottom: 10px; }
 
-    .card-footer { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
+    .card-footer { font-size: 11px; color: #888888; display: flex; flex-direction: column; gap: 3px; }
+    .btn-delete {
+      background: none; border: 1px solid #ffcccc; color: #aaaaaa;
+      cursor: pointer; font-size: 11px; padding: 2px 8px; border-radius: 2px; line-height: 1.4;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .btn-delete:hover { background: rgba(255,67,61,.08); color: var(--red); border-color: var(--red); }
   </style>
 </head>
 <body>
@@ -772,7 +786,14 @@ OVERVIEW_HTML = """<!DOCTYPE html>
     <div>No running instances found</div>
     <p>Start a paper trader with:<br><code>python main.py --strategy momentum --mode paper --duration 60</code></p>
   </div>
-  <div id="instances-grid"></div>
+  <div id="active-section" class="section-wrap" style="display:none">
+    <div class="section-header">Active Sessions</div>
+    <div id="active-grid" class="instances-grid"></div>
+  </div>
+  <div id="expired-section" class="section-wrap" style="display:none">
+    <div class="section-header">Expired Sessions</div>
+    <div id="expired-grid" class="instances-grid"></div>
+  </div>
 </main>
 
 <script>
@@ -808,8 +829,8 @@ function createSparkChart(canvas, data) {
       labels: data.map((_, i) => i),
       datasets: [{
         data: data,
-        borderColor: '#667eea',
-        backgroundColor: 'rgba(102,126,234,0.12)',
+        borderColor: '#ff8c00',
+        backgroundColor: 'rgba(255,140,0,0.10)',
         borderWidth: 1.5,
         pointRadius: 0,
         tension: 0.3,
@@ -829,22 +850,24 @@ function createSparkChart(canvas, data) {
   });
 }
 
-function createInstanceCard(inst) {
+function createInstanceCard(inst, gridId) {
   const p    = inst.portfolio;
   const m    = inst.metrics;
   const live = inst.is_live;
 
   const a = document.createElement('a');
-  a.className = 'instance-card' + (live ? '' : ' dead');
+  a.className = 'instance-card' + (live ? ' live' : ' dead');
   a.href      = '/instance/' + inst.name;
 
-  const startStr  = inst.session_start ? timeLabel(inst.session_start) : '—';
-  const retPct    = parseFloat(p.total_return_pct) || 0;
-  const winRate   = parseFloat(m.win_rate_pct) || 0;
-  const tickInfo  = live
+  const startStr = inst.session_start ? timeLabel(inst.session_start) : '—';
+  const retPct   = parseFloat(p.total_return_pct) || 0;
+  const winRate  = parseFloat(m.win_rate_pct) || 0;
+  const sharpe   = parseFloat(m.sharpe_ratio) || 0;
+  const maxdd    = parseFloat(m.max_drawdown_pct) || 0;
+  const tickInfo = live
     ? `Tick ${inst.tick} · ${fmtMin(inst.remaining_minutes)} remaining`
     : 'Session ended';
-  const platform  = inst.platform || 'polymarket';
+  const platform = inst.platform || 'polymarket';
 
   a.innerHTML = `
     <div class="card-header">
@@ -853,19 +876,28 @@ function createInstanceCard(inst) {
         <span class="card-name">${inst.name}</span>
         <span class="${platformBadgeClass(platform)}">${platform}</span>
       </div>
-      <span class="card-arrow">&#8594;</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        ${!live ? `<button class="btn-delete" onclick="deleteCard(event,'${inst.name}')">Delete</button>` : ''}
+        <span class="card-arrow">&#8594;</span>
+      </div>
     </div>
-    <div class="card-meta">
-      ${inst.strategy}  ·  started ${startStr}
-    </div>
+    <div class="card-meta">${inst.strategy}  ·  started ${startStr}</div>
     <div class="card-stats">
       <div>
         <div class="card-stat-label">Portfolio</div>
-        <div class="card-stat-value neu">${fmt$(p.total_value)}</div>
+        <div class="card-stat-value neu" data-portfolio>${fmt$(p.total_value)}</div>
       </div>
       <div>
         <div class="card-stat-label">Return</div>
         <div class="card-stat-value ${colorClass(retPct)}" data-return>${fmtPct(retPct)}</div>
+      </div>
+      <div>
+        <div class="card-stat-label">Sharpe</div>
+        <div class="card-stat-value neu" data-sharpe>${isFinite(sharpe) ? sharpe.toFixed(2) : '—'}</div>
+      </div>
+      <div>
+        <div class="card-stat-label">Drawdown</div>
+        <div class="card-stat-value ${maxdd > 0 ? 'neg' : 'neu'}" data-drawdown>${fmtPct(maxdd)}</div>
       </div>
     </div>
     <div class="sparkline-wrap"><canvas></canvas></div>
@@ -875,7 +907,7 @@ function createInstanceCard(inst) {
     </div>
   `;
 
-  document.getElementById('instances-grid').appendChild(a);
+  document.getElementById(gridId).appendChild(a);
 
   const canvas = a.querySelector('canvas');
   let chart = null;
@@ -895,33 +927,32 @@ function updateInstanceCard(inst) {
   const m    = inst.metrics;
   const live = inst.is_live;
 
-  if (live) card.classList.remove('dead');
-  else       card.classList.add('dead');
+  if (live) { card.classList.add('live'); card.classList.remove('dead'); }
+  else       { card.classList.remove('live'); card.classList.add('dead'); }
   const dot = card.querySelector('.dot');
   if (dot) { live ? dot.classList.remove('dot-dead') : dot.classList.add('dot-dead'); }
 
-  const retEl  = card.querySelector('[data-return]');
   const retPct = parseFloat(p.total_return_pct) || 0;
-  if (retEl) {
-    retEl.textContent = fmtPct(retPct);
-    retEl.className   = 'card-stat-value ' + colorClass(retPct);
-  }
+  const retEl  = card.querySelector('[data-return]');
+  if (retEl) { retEl.textContent = fmtPct(retPct); retEl.className = 'card-stat-value ' + colorClass(retPct); }
 
-  const statVals = card.querySelectorAll('.card-stat-value');
-  if (statVals[0]) statVals[0].textContent = fmt$(p.total_value);
+  const portEl = card.querySelector('[data-portfolio]');
+  if (portEl) portEl.textContent = fmt$(p.total_value);
+
+  const sharpe  = parseFloat(m.sharpe_ratio) || 0;
+  const sharpeEl = card.querySelector('[data-sharpe]');
+  if (sharpeEl) sharpeEl.textContent = isFinite(sharpe) ? sharpe.toFixed(2) : '—';
+
+  const maxdd   = parseFloat(m.max_drawdown_pct) || 0;
+  const ddEl    = card.querySelector('[data-drawdown]');
+  if (ddEl) { ddEl.textContent = fmtPct(maxdd); ddEl.className = 'card-stat-value ' + (maxdd > 0 ? 'neg' : 'neu'); }
 
   const tickEl = card.querySelector('[data-tick]');
-  if (tickEl) {
-    tickEl.textContent = live
-      ? `Tick ${inst.tick} · ${fmtMin(inst.remaining_minutes)} remaining`
-      : 'Session ended';
-  }
+  if (tickEl) tickEl.textContent = live ? `Tick ${inst.tick} · ${fmtMin(inst.remaining_minutes)} remaining` : 'Session ended';
 
-  const tradesEl = card.querySelector('[data-trades]');
   const winRate  = parseFloat(m.win_rate_pct) || 0;
-  if (tradesEl) {
-    tradesEl.textContent = `${p.total_trades} trades (${p.sell_trades} sells) · Win ${winRate.toFixed(1)}%`;
-  }
+  const tradesEl = card.querySelector('[data-trades]');
+  if (tradesEl) tradesEl.textContent = `${p.total_trades} trades (${p.sell_trades} sells) · Win ${winRate.toFixed(1)}%`;
 
   if (chart) {
     const d = inst.sparkline || [];
@@ -939,31 +970,45 @@ async function pollInstances() {
     instances = await res.json();
   } catch { scheduleNext(); return; }
 
-  const grid         = document.getElementById('instances-grid');
   const emptyEl      = document.getElementById('empty-state');
+  const activeSec    = document.getElementById('active-section');
+  const expiredSec   = document.getElementById('expired-section');
+  const activeGrid   = document.getElementById('active-grid');
   const liveCountEl  = document.getElementById('live-count');
   const totalCountEl = document.getElementById('total-count');
   const lastRefEl    = document.getElementById('last-refresh');
 
-  if (!instances.length) {
-    emptyEl.style.display = 'block';
-    grid.style.display    = 'none';
-  } else {
-    emptyEl.style.display = 'none';
-    grid.style.display    = '';
-  }
+  const liveInsts = instances.filter(i => i.is_live);
+  const deadInsts = instances.filter(i => !i.is_live);
 
-  let liveCount = 0;
+  // Sort active sessions by return descending (highest return first)
+  liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_return_pct) || 0) - (parseFloat(a.portfolio.total_return_pct) || 0));
+
+  // Create or update all cards
   for (const inst of instances) {
-    if (inst.is_live) liveCount++;
+    const gridId = inst.is_live ? 'active-grid' : 'expired-grid';
     if (instanceMap.has(inst.name)) {
       updateInstanceCard(inst);
+      // Move card to correct grid if live status changed
+      const card = instanceMap.get(inst.name).card;
+      const targetGrid = document.getElementById(gridId);
+      if (card.parentElement !== targetGrid) targetGrid.appendChild(card);
     } else {
-      createInstanceCard(inst);
+      createInstanceCard(inst, gridId);
     }
   }
 
-  if (liveCountEl)  liveCountEl.textContent  = liveCount;
+  // Re-order active grid by return rank (appendChild moves existing elements)
+  liveInsts.forEach(inst => {
+    const entry = instanceMap.get(inst.name);
+    if (entry) activeGrid.appendChild(entry.card);
+  });
+
+  emptyEl.style.display    = instances.length ? 'none' : 'block';
+  activeSec.style.display  = liveInsts.length  ? '' : 'none';
+  expiredSec.style.display = deadInsts.length  ? '' : 'none';
+
+  if (liveCountEl)  liveCountEl.textContent  = liveInsts.length;
   if (totalCountEl) totalCountEl.textContent = instances.length;
   if (lastRefEl)    lastRefEl.textContent     = 'updated ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
 
@@ -972,6 +1017,20 @@ async function pollInstances() {
 
 function scheduleNext() {
   setTimeout(pollInstances, 2000);
+}
+
+async function deleteCard(event, name) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!confirm('Delete session "' + name + '"?\\nThis removes the state file permanently.')) return;
+  try {
+    const res = await fetch('/api/delete/' + name, { method: 'POST' });
+    if (res.ok) {
+      const entry = instanceMap.get(name);
+      if (entry) entry.card.remove();
+      instanceMap.delete(name);
+    }
+  } catch (e) { /* ignore */ }
 }
 
 pollInstances();
@@ -998,6 +1057,21 @@ def instance_detail(name: str):
     html = DASHBOARD_HTML.replace("__INSTANCE_NAME__", name)
     resp = Response(html, mimetype="text/html")
     return _no_cache(resp)
+
+
+@app.route("/api/delete/<name>", methods=["POST"])
+def api_delete(name: str):
+    """Delete the state file for a named instance."""
+    if not _valid_name(name):
+        abort(400, "Invalid instance name")
+    path = _find_state_path(name)
+    if path is None:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    try:
+        os.remove(path)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------

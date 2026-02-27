@@ -574,3 +574,285 @@ class PaperTrader:
             self.portfolio.execute_sell(
                 signal=sell_signal, market_slug=pos.market_slug, timestamp=close_time,
             )
+
+
+# ---------------------------------------------------------------------------
+# 5-minute BTC up/down paper trader
+# ---------------------------------------------------------------------------
+
+class FiveMinPaperTrader(PaperTrader):
+    """
+    Paper trader specialised for Polymarket's 5-minute BTC up/down markets.
+
+    Key differences from PaperTrader:
+    - Polls every 30 seconds (not 5 minutes)
+    - Market is identified by computing the current 5-min interval slug from the clock
+    - Transitions to the next market automatically every 5 minutes
+    - Strategy runs on a cross-market synthetic history (one PriceBar per resolved market)
+    - Force-exits any open Up position 30 seconds before each market closes
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._current_interval_start: int = 0
+        self._cross_market_history: List[PriceBar] = []
+        self._current_market: Optional[Market] = None
+
+    # ------------------------------------------------------------------
+    # run() — 30-second poll loop
+    # ------------------------------------------------------------------
+
+    def run(self) -> dict:
+        global _stop_requested
+        _stop_requested = False
+
+        signal.signal(signal.SIGINT, _handle_sigint)
+
+        from config import (
+            FIVE_MIN_POLL_INTERVAL_SECONDS,
+            FIVE_MIN_MARKET_REFRESH_TICKS,
+        )
+
+        print(f"\n5-Minute Market Mode — {self.strategy.name}")
+        print(f"Instance:  {self.instance_name}")
+        print(f"Poll interval: {FIVE_MIN_POLL_INTERVAL_SECONDS}s | Duration: {self.duration_minutes} min")
+        print(f"State file: data/state_{self.instance_name}.json")
+        print("-" * 55)
+        sys.stdout.flush()
+
+        self._refresh_markets(initial=True)
+        if not self.markets:
+            print("ERROR: No active 5-minute market found. Markets may be between intervals.")
+            return {}
+
+        self.session_start = datetime.utcnow()
+        end_time = self.session_start + timedelta(minutes=self.duration_minutes)
+        self.session_end = end_time
+        print(f"\nSession runs until {end_time.strftime('%H:%M:%S UTC')} "
+              f"({self.duration_minutes} minutes from now)")
+        print("Press Ctrl+C to stop early.\n")
+        print("=" * 55)
+
+        while datetime.utcnow() < end_time and not _stop_requested:
+            if self.tick_count > 0 and self.tick_count % FIVE_MIN_MARKET_REFRESH_TICKS == 0:
+                self._refresh_markets(initial=False)
+
+            self._run_5min_tick()
+            self._write_state()
+
+            next_tick = datetime.utcnow() + timedelta(seconds=FIVE_MIN_POLL_INTERVAL_SECONDS)
+            while datetime.utcnow() < next_tick and not _stop_requested:
+                if datetime.utcnow() >= end_time:
+                    break
+                time.sleep(5)
+
+        final_prices = self._get_latest_prices()
+        self._close_all_positions(final_prices)
+
+        final_value = self.portfolio.total_value(final_prices)
+        results = metrics_module.compute_all_metrics(
+            trades        = self.portfolio.trade_log,
+            equity_curve  = self.equity_curve,
+            starting_cash = self.portfolio.starting_cash,
+            final_value   = final_value,
+        )
+        print("\nPaper trading session complete.")
+        return results
+
+    # ------------------------------------------------------------------
+    # _refresh_markets() — detect interval change, fetch new market
+    # ------------------------------------------------------------------
+
+    def _refresh_markets(self, initial: bool = False) -> None:
+        """Override: fetch the current 5-min market by slug, detect market transition."""
+        from data_fetcher import fetch_current_5min_market
+        from config import FIVE_MIN_INTERVAL_SECONDS
+
+        current_interval = int(time.time()) // FIVE_MIN_INTERVAL_SECONDS * FIVE_MIN_INTERVAL_SECONDS
+
+        if current_interval == self._current_interval_start and not initial:
+            return  # Same market, no change
+
+        # Market changed (or first call): record previous market's last price
+        if not initial and self._current_market:
+            prev_token_id = self._current_market.yes_token_id
+            prev_bars = self.price_history.get(prev_token_id, [])
+            if prev_bars:
+                closing_bar = PriceBar(
+                    token_id  = "btc_5min_cross_market",
+                    timestamp = prev_bars[-1].timestamp,
+                    price     = prev_bars[-1].price,
+                )
+                self._cross_market_history.append(closing_bar)
+                print(f"  [5min] Market closed. Cross-market history: "
+                      f"{len(self._cross_market_history)} bars")
+
+        market = fetch_current_5min_market()
+        if market is None or market.is_resolved:
+            print("  WARNING: 5-min market not yet available or already resolved. "
+                  "Retrying next tick.")
+            return
+
+        self._current_interval_start = current_interval
+        self._current_market = market
+        self.markets = [market]
+
+        if market.yes_token_id not in self._known_token_ids:
+            self._load_history_for_markets([market])
+
+        print(f"  [5min] Tracking market: {market.question[:70]}")
+        print(f"  [5min] End: {market.end_date}  |  Up token: {market.yes_token_id[:12]}...")
+        sys.stdout.flush()
+
+    # ------------------------------------------------------------------
+    # _run_5min_tick() — single tick: force-exit check + strategy signal
+    # ------------------------------------------------------------------
+
+    def _run_5min_tick(self) -> None:
+        """
+        Single tick for 5-min mode.
+
+        1. Check if we're within EXIT_BUFFER_SECONDS of market close → force-sell.
+        2. Otherwise fetch latest price, build cross-market history DataFrame,
+           run strategy, execute signal through risk manager and portfolio.
+        """
+        from config import FIVE_MIN_INTERVAL_SECONDS, FIVE_MIN_EXIT_BUFFER_SECONDS
+
+        self.tick_count += 1
+        now = datetime.utcnow()
+        print(f"\n{'='*55}")
+        print(f"[5min Tick {self.tick_count}] {now.strftime('%H:%M:%S UTC')}")
+
+        seconds_into_interval = int(time.time()) % FIVE_MIN_INTERVAL_SECONDS
+        seconds_remaining = FIVE_MIN_INTERVAL_SECONDS - seconds_into_interval
+        print(f"  Interval: {seconds_into_interval}s elapsed | {seconds_remaining}s remaining")
+        sys.stdout.flush()
+
+        # ---- pre-resolution force-exit ----
+        if seconds_remaining <= FIVE_MIN_EXIT_BUFFER_SECONDS and self.markets:
+            current_prices = self._get_latest_prices()
+            market = self.markets[0]
+            token_id = market.yes_token_id
+            pos = self.portfolio.positions.get(token_id)
+            if pos:
+                price = current_prices.get(token_id, pos.avg_cost)
+                print(f"  [5min] Pre-resolution exit: {seconds_remaining}s left — force-selling")
+                sell_signal = Signal(
+                    action     = "SELL",
+                    token_id   = token_id,
+                    outcome    = pos.outcome,
+                    price      = price,
+                    reason     = f"Pre-resolution exit ({seconds_remaining}s left)",
+                    confidence = 1.0,
+                )
+                trade = self.portfolio.execute_sell(
+                    signal=sell_signal, market_slug=market.slug, timestamp=now,
+                )
+                if trade:
+                    pnl_sign = "+" if trade.pnl >= 0 else ""
+                    print(f"    -> Closed: {pnl_sign}${trade.pnl:.2f} PnL")
+            # Skip strategy signal this tick; let market transition on next refresh
+            total_val = self.portfolio.total_value(self._get_latest_prices())
+            self.equity_curve.append(total_val)
+            return
+
+        if not self.markets:
+            return
+
+        market = self.markets[0]
+        token_id = market.yes_token_id
+
+        # ---- fetch latest intra-market price bar ----
+        latest_bar = self._fetch_latest_price(token_id)
+        if latest_bar:
+            history = self.price_history.setdefault(token_id, [])
+            prev_price = history[-1].price if history else latest_bar.price
+            history.append(latest_bar)
+            delta = latest_bar.price - prev_price
+            arrow = "^" if delta > 0 else ("v" if delta < 0 else "-")
+            print(f"  Up token: {latest_bar.price:.4f} {arrow}{abs(delta):.4f} "
+                  f"| {len(history)} intra-market bars")
+            current_price = latest_bar.price
+        else:
+            intra = self.price_history.get(token_id, [])
+            current_price = intra[-1].price if intra else 0.5
+            print(f"  Up token: {current_price:.4f} [no new bar]")
+        sys.stdout.flush()
+
+        # ---- choose history for strategy ----
+        # Use cross-market synthetic series once we have >= 2 bars;
+        # fall back to intra-market bars during the first warmup market.
+        history_to_use = self._cross_market_history
+        if len(history_to_use) < 2:
+            intra = self.price_history.get(token_id, [])
+            history_to_use = intra
+
+        if len(history_to_use) < 2:
+            print(f"    -> Waiting for history ({len(history_to_use)} bars)")
+            total_val = self.portfolio.total_value(self._get_latest_prices())
+            self.equity_curve.append(total_val)
+            return
+
+        df = pd.DataFrame(
+            {"price": [b.price for b in history_to_use[:-1]]},
+            index=[b.timestamp for b in history_to_use[:-1]],
+        )
+        df.index = pd.DatetimeIndex(df.index)
+
+        sig = self.strategy.generate_signal(
+            token_id      = token_id,
+            price_history = df,
+            current_price = current_price,
+            current_time  = now,
+        )
+
+        print(f"    -> Signal: {sig.action} | conf={sig.confidence:.0%} | {sig.reason}")
+        sys.stdout.flush()
+
+        self.latest_signals[token_id] = {
+            "slug":       market.slug,
+            "question":   market.question,
+            "price":      current_price,
+            "signal":     sig.action,
+            "reason":     sig.reason,
+            "confidence": sig.confidence,
+            "updated_at": now.isoformat(),
+        }
+
+        current_prices = {token_id: current_price}
+
+        if sig.action != "HOLD":
+            allowed, trade_size, risk_reason = self.risk_manager.check_signal(
+                signal         = sig,
+                portfolio      = self.portfolio,
+                current_prices = current_prices,
+            )
+            if allowed:
+                print(f"    -> Risk manager: APPROVED — {risk_reason}")
+                if sig.action == "BUY":
+                    trade = self.portfolio.execute_buy(
+                        signal          = sig,
+                        market_slug     = market.slug,
+                        trade_size_usdc = trade_size,
+                        timestamp       = now,
+                    )
+                    if trade:
+                        print(f"    *** BUY {trade.shares:.2f} shares @ ${trade.price:.4f}")
+                        self.strategy.on_trade_executed(trade)
+                elif sig.action == "SELL":
+                    trade = self.portfolio.execute_sell(
+                        signal      = sig,
+                        market_slug = market.slug,
+                        timestamp   = now,
+                    )
+                    if trade:
+                        pnl_sign = "+" if trade.pnl >= 0 else ""
+                        print(f"    *** SELL {trade.shares:.2f} shares @ ${trade.price:.4f} "
+                              f"| PnL={pnl_sign}${trade.pnl:.2f}")
+                        self.strategy.on_trade_executed(trade)
+            else:
+                print(f"    -> Risk manager: BLOCKED — {risk_reason}")
+        sys.stdout.flush()
+
+        total_val = self.portfolio.total_value(current_prices)
+        self.equity_curve.append(total_val)

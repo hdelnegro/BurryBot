@@ -122,6 +122,33 @@ MARKET_REFRESH_INTERVAL_TICKS = 12
 MAX_WATCHED_MARKETS = 50
 
 # ---------------------------------------------------------------------------
+# 5-minute BTC up/down market settings
+# ---------------------------------------------------------------------------
+
+# How many seconds between ticks in 5-min mode (10× faster than standard)
+FIVE_MIN_POLL_INTERVAL_SECONDS = 30
+
+# Every N ticks, check if the current 5-min market has rolled over to a new one
+# 10 ticks × 30s = check every 5 minutes
+FIVE_MIN_MARKET_REFRESH_TICKS = 10
+
+# Length of each 5-minute window in seconds
+FIVE_MIN_INTERVAL_SECONDS = 300
+
+# Force-exit any open Up position this many seconds before each market closes
+# (avoids binary resolution risk as the token price converges to 0 or 1)
+FIVE_MIN_EXIT_BUFFER_SECONDS = 30
+
+# Strategy lookback params tuned for 5-min cross-market history
+FIVE_MIN_MOMENTUM_LOOKBACK     = 3   # 3 successive markets to confirm momentum
+FIVE_MIN_MEAN_REVERSION_WINDOW = 8   # 8-market rolling window
+FIVE_MIN_RSI_PERIOD            = 7   # 7-period RSI for fast markets
+
+# Gamma API slug prefix for 5-min BTC up/down markets
+BTC_UPDOWN_5M_PREFIX = "btc-updown-5m"
+
+
+# ---------------------------------------------------------------------------
 # Phase flags
 # ---------------------------------------------------------------------------
 PAPER_TRADING_ENABLED = True    # Phase 2: simulate live trading without real money

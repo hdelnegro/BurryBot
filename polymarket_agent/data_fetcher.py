@@ -203,6 +203,55 @@ def fetch_price_history(token_id: str) -> List[PriceBar]:
 
 
 # ---------------------------------------------------------------------------
+# 5-minute BTC up/down markets: fetch current market by slug
+# ---------------------------------------------------------------------------
+
+def fetch_current_5min_market() -> Optional[Market]:
+    """
+    Compute the slug for the currently-open 5-minute BTC up/down market
+    from the system clock, then fetch its details from the Gamma API.
+
+    Slug format: btc-updown-5m-{interval_start_unix_ts}
+    where interval_start = floor(time.time() / 300) * 300
+
+    Returns a Market object (Up token = yes_token_id, Down token = no_token_id),
+    or None if the market cannot be found or parsed.
+    """
+    import json as _json
+    from config import BTC_UPDOWN_5M_PREFIX, FIVE_MIN_INTERVAL_SECONDS
+
+    interval_start = int(time.time()) // FIVE_MIN_INTERVAL_SECONDS * FIVE_MIN_INTERVAL_SECONDS
+    slug = f"{BTC_UPDOWN_5M_PREFIX}-{interval_start}"
+
+    data = _get_with_retry(GAMMA_API_URL, params={"slug": slug})
+    if not data or not isinstance(data, list) or not data:
+        print(f"  WARNING: No 5-min market found for slug {slug}")
+        return None
+
+    item = data[0]
+    try:
+        raw_token_ids = item.get("clobTokenIds", "[]")
+        token_ids = _json.loads(raw_token_ids) if isinstance(raw_token_ids, str) else raw_token_ids
+        if len(token_ids) < 2:
+            print(f"  WARNING: 5-min market {slug} has fewer than 2 token IDs")
+            return None
+
+        return Market(
+            condition_id = item.get("conditionId", ""),
+            question     = item.get("question", "Unknown"),
+            slug         = item.get("slug", slug),
+            yes_token_id = token_ids[0],   # "Up" token
+            no_token_id  = token_ids[1],   # "Down" token
+            end_date     = item.get("endDate"),
+            is_resolved  = item.get("closed", False),
+            outcome      = None,
+        )
+    except Exception as e:
+        print(f"  WARNING: Could not parse 5-min market {slug}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Stub for Phase 2: order book depth (not used in backtesting)
 # ---------------------------------------------------------------------------
 

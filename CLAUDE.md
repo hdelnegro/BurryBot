@@ -60,6 +60,10 @@ python main.py --strategy rsi --mode paper --duration 120 --name run2
 # Paper trading with live web dashboard (http://localhost:5000)
 python main.py --strategy momentum --mode paper --duration 60 --dashboard
 
+# 5-minute BTC up/down markets (30-second poll, much faster trading)
+python main.py --strategy momentum --mode paper --market-type 5min --duration 60
+python main.py --strategy rsi --mode paper --market-type 5min --duration 30 --name btc5m
+
 # Check status of a running paper trading session (no venv needed)
 python status.py
 ```

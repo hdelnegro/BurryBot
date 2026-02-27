@@ -34,7 +34,6 @@ from config import (
     DEFAULT_STARTING_CASH,
     PAPER_DEFAULT_DURATION_MINUTES,
 )
-from shared.dashboard import start_in_thread as start_dashboard
 from data_fetcher import fetch_markets, fetch_price_history
 from data_storage import (
     save_markets, load_markets, markets_cache_exists,
@@ -43,7 +42,7 @@ from data_storage import (
 from shared.portfolio import Portfolio
 from shared.risk_manager import RiskManager
 from shared.backtest_engine import BacktestEngine
-from paper_trader import PaperTrader
+from paper_trader import PaperTrader, FiveMinPaperTrader
 from shared import metrics as metrics_module
 
 # Import all available strategies
@@ -147,6 +146,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "[paper mode only] Instance name for this run (letters, digits, underscores, hyphens).\n"
             "Defaults to <strategy>_<HHMM> if not provided."
+        ),
+    )
+
+    parser.add_argument(
+        "--market-type",
+        type=str,
+        default="standard",
+        choices=["standard", "5min"],
+        dest="market_type",
+        help=(
+            "[paper mode only] Market type (default: standard):\n"
+            "  standard — top-volume Polymarket markets, 5-min poll\n"
+            "  5min     — BTC 5-minute up/down markets, 30-second poll"
         ),
     )
 
@@ -361,14 +373,15 @@ def interactive_setup() -> argparse.Namespace:
         sys.exit(0)
 
     return argparse.Namespace(
-        strategy  = strategy,
-        mode      = mode,
-        markets   = markets,
-        cash      = cash,
-        duration  = duration,
-        dashboard = dashboard,
-        no_fetch  = no_fetch,
-        name      = None,
+        strategy    = strategy,
+        mode        = mode,
+        markets     = markets,
+        cash        = cash,
+        duration    = duration,
+        dashboard   = dashboard,
+        no_fetch    = no_fetch,
+        name        = None,
+        market_type = "standard",
     )
 
 
@@ -384,11 +397,14 @@ def main():
         args   = parser.parse_args()
 
     mode_label = "Paper Trading" if args.mode == "paper" else "Backtesting"
+    market_type = getattr(args, "market_type", "standard")
 
     print()
     print("=" * 55)
     print(f"  Polymarket Agent — {mode_label}")
     print(f"  Strategy : {args.strategy}")
+    if args.mode == "paper":
+        print(f"  Market type: {market_type}")
     print(f"  Markets  : {args.markets}")
     print(f"  Cash     : ${args.cash:.2f}")
     if args.mode == "paper":
@@ -397,7 +413,21 @@ def main():
 
     strategy_class = STRATEGY_MAP[args.strategy]
     strategy       = strategy_class()
-    strategy.setup(params={})
+
+    # Apply strategy params — use tuned 5-min values when in 5min market mode
+    if market_type == "5min":
+        from config import (
+            FIVE_MIN_MOMENTUM_LOOKBACK,
+            FIVE_MIN_MEAN_REVERSION_WINDOW,
+            FIVE_MIN_RSI_PERIOD,
+        )
+        strategy.setup(params={
+            "lookback": FIVE_MIN_MOMENTUM_LOOKBACK,
+            "window":   FIVE_MIN_MEAN_REVERSION_WINDOW,
+            "period":   FIVE_MIN_RSI_PERIOD,
+        })
+    else:
+        strategy.setup(params={})
 
     portfolio    = Portfolio(starting_cash=args.cash)
     risk_manager = RiskManager()
@@ -414,11 +444,13 @@ def main():
 
         if args.dashboard:
             try:
+                from shared.dashboard import start_in_thread as start_dashboard
                 start_dashboard(host="127.0.0.1", port=5000)
             except OSError:
                 print("Dashboard already running at http://localhost:5000")
 
-        trader = PaperTrader(
+        trader_class = FiveMinPaperTrader if market_type == "5min" else PaperTrader
+        trader = trader_class(
             strategy         = strategy,
             portfolio        = portfolio,
             risk_manager     = risk_manager,

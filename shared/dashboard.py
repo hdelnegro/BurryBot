@@ -298,6 +298,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .badge-buy  { background: rgba(74,246,195,.15); color: var(--green); }
     .badge-sell { background: rgba(255,67,61,.15);  color: var(--red); }
     .badge-hold { background: rgba(112,112,112,.15); color: var(--muted); }
+    .badge-yes  { background: var(--green);  color: #000; }
+    .badge-no   { background: var(--accent); color: #000; }
 
     .reason-text { color: var(--muted); font-size: 11px; margin-top: 2px; }
 
@@ -378,8 +380,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="panel" style="overflow:auto; max-height:290px;">
       <h2>Market Signals (latest)</h2>
       <table style="table-layout:fixed">
-        <thead><tr><th>Market</th><th style="width:70px">Price</th><th style="width:64px">Signal</th><th style="width:44px">Conf</th></tr></thead>
-        <tbody id="signals-body"><tr><td colspan="4" class="no-data">waiting for first tick…</td></tr></tbody>
+        <thead><tr><th>Market</th><th style="width:70px">Price</th><th style="width:42px">Side</th><th style="width:64px">Signal</th><th style="width:44px">Conf</th></tr></thead>
+        <tbody id="signals-body"><tr><td colspan="5" class="no-data">waiting for first tick…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -388,15 +390,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="panel" style="overflow:auto;">
       <h2>Open Positions</h2>
       <table>
-        <thead><tr><th>Market</th><th>Shares</th><th>Avg $</th><th>Now $</th><th>PnL</th><th>% Portf</th></tr></thead>
-        <tbody id="positions-body"><tr><td colspan="6" class="no-data">no open positions</td></tr></tbody>
+        <thead><tr><th>Market</th><th>Side</th><th>Shares</th><th>Avg $</th><th>Now $</th><th>PnL</th><th>% Portf</th></tr></thead>
+        <tbody id="positions-body"><tr><td colspan="7" class="no-data">no open positions</td></tr></tbody>
       </table>
     </div>
     <div class="panel" style="overflow:auto;">
       <h2>Recent Trades</h2>
       <table>
-        <thead><tr><th>Time</th><th>Market</th><th>Action</th><th>Price</th><th>PnL</th></tr></thead>
-        <tbody id="trades-body"><tr><td colspan="5" class="no-data">no trades yet</td></tr></tbody>
+        <thead><tr><th>Time</th><th>Market</th><th>Action</th><th>Side</th><th>Price</th><th>PnL</th></tr></thead>
+        <tbody id="trades-body"><tr><td colspan="6" class="no-data">no trades yet</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -576,19 +578,22 @@ async function refresh() {
 
     const sigBody = document.getElementById('signals-body');
     if (data.market_signals && data.market_signals.length) {
-      sigBody.innerHTML = data.market_signals.map(s => `
-        <tr>
+      sigBody.innerHTML = data.market_signals.map(s => {
+        const sSide = (s.outcome || 'YES').toUpperCase();
+        return `<tr>
           <td style="overflow:hidden">
             <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                  title="${s.question || ''}">${(s.slug || '').replace(/-/g,' ')}</div>
             <div class="reason-text">${s.reason || ''}</div>
           </td>
           <td>${parseFloat(s.price).toFixed(4)}</td>
+          <td><span class="badge badge-${sSide.toLowerCase()}">${sSide}</span></td>
           <td><span class="badge ${badgeClass(s.signal)}">${s.signal}</span></td>
           <td style="color:var(--muted)">${s.signal === 'HOLD' ? '—' : (parseFloat(s.confidence) * 100).toFixed(0) + '%'}</td>
-        </tr>`).join('');
+        </tr>`;
+      }).join('');
     } else {
-      sigBody.innerHTML = '<tr><td colspan="4" class="no-data">waiting for first tick…</td></tr>';
+      sigBody.innerHTML = '<tr><td colspan="5" class="no-data">waiting for first tick…</td></tr>';
     }
 
     const posBody    = document.getElementById('positions-body');
@@ -597,9 +602,11 @@ async function refresh() {
       posBody.innerHTML = data.positions.map(pos => {
         const posValue = parseFloat(pos.shares) * parseFloat(pos.current_price);
         const pct      = (posValue / totalValue * 100).toFixed(1) + '%';
+        const side = (pos.outcome || 'YES').toUpperCase();
         return `<tr>
           <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
               title="${pos.market_slug || ''}">${(pos.market_slug || '').replace(/-/g,' ')}</td>
+          <td><span class="badge badge-${side.toLowerCase()}">${side}</span></td>
           <td>${parseFloat(pos.shares).toFixed(0)}</td>
           <td>${parseFloat(pos.avg_cost).toFixed(4)}</td>
           <td>${parseFloat(pos.current_price).toFixed(4)}</td>
@@ -608,22 +615,25 @@ async function refresh() {
         </tr>`;
       }).join('');
     } else {
-      posBody.innerHTML = '<tr><td colspan="6" class="no-data">no open positions</td></tr>';
+      posBody.innerHTML = '<tr><td colspan="7" class="no-data">no open positions</td></tr>';
     }
 
     const trBody = document.getElementById('trades-body');
     if (data.recent_trades && data.recent_trades.length) {
-      trBody.innerHTML = data.recent_trades.map(t => `
-        <tr>
+      trBody.innerHTML = data.recent_trades.map(t => {
+        const tSide = (t.outcome || 'YES').toUpperCase();
+        return `<tr>
           <td>${timeLabel(t.timestamp)}</td>
           <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
               title="${t.market_slug || ''}">${(t.market_slug || '').replace(/-/g,' ')}</td>
           <td><span class="badge ${badgeClass(t.action)}">${t.action}</span></td>
+          <td><span class="badge badge-${tSide.toLowerCase()}">${tSide}</span></td>
           <td>${parseFloat(t.price).toFixed(4)}</td>
           <td class="${colorClass(t.pnl)}">${t.action === 'BUY' ? '—' : ((parseFloat(t.pnl) >= 0 ? '+' : '') + parseFloat(t.pnl).toFixed(2))}</td>
-        </tr>`).join('');
+        </tr>`;
+      }).join('');
     } else {
-      trBody.innerHTML = '<tr><td colspan="5" class="no-data">no trades yet</td></tr>';
+      trBody.innerHTML = '<tr><td colspan="6" class="no-data">no trades yet</td></tr>';
     }
 
     lastSuccessfulFetch = Date.now();

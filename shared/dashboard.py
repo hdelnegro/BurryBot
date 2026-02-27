@@ -752,7 +752,13 @@ OVERVIEW_HTML = """<!DOCTYPE html>
 
     .sparkline-wrap { position: relative; height: 80px; margin-bottom: 10px; }
 
-    .card-footer { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
+    .card-footer { font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+    .btn-delete {
+      background: none; border: 1px solid rgba(252,129,129,.35); color: var(--muted);
+      cursor: pointer; font-size: 11px; padding: 2px 8px; border-radius: 4px; line-height: 1.4;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    .btn-delete:hover { background: rgba(252,129,129,.15); color: var(--red); border-color: var(--red); }
   </style>
 </head>
 <body>
@@ -853,7 +859,10 @@ function createInstanceCard(inst) {
         <span class="card-name">${inst.name}</span>
         <span class="${platformBadgeClass(platform)}">${platform}</span>
       </div>
-      <span class="card-arrow">&#8594;</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        ${!live ? `<button class="btn-delete" onclick="deleteCard(event,'${inst.name}')">Delete</button>` : ''}
+        <span class="card-arrow">&#8594;</span>
+      </div>
     </div>
     <div class="card-meta">
       ${inst.strategy}  ·  started ${startStr}
@@ -974,6 +983,20 @@ function scheduleNext() {
   setTimeout(pollInstances, 2000);
 }
 
+async function deleteCard(event, name) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!confirm('Delete session "' + name + '"?\\nThis removes the state file permanently.')) return;
+  try {
+    const res = await fetch('/api/delete/' + name, { method: 'POST' });
+    if (res.ok) {
+      const entry = instanceMap.get(name);
+      if (entry) entry.card.remove();
+      instanceMap.delete(name);
+    }
+  } catch (e) { /* ignore */ }
+}
+
 pollInstances();
 </script>
 </body>
@@ -998,6 +1021,21 @@ def instance_detail(name: str):
     html = DASHBOARD_HTML.replace("__INSTANCE_NAME__", name)
     resp = Response(html, mimetype="text/html")
     return _no_cache(resp)
+
+
+@app.route("/api/delete/<name>", methods=["POST"])
+def api_delete(name: str):
+    """Delete the state file for a named instance."""
+    if not _valid_name(name):
+        abort(400, "Invalid instance name")
+    path = _find_state_path(name)
+    if path is None:
+        return jsonify({"ok": False, "error": "not found"}), 404
+    try:
+        os.remove(path)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------

@@ -24,31 +24,33 @@ import sys
 import os
 import time
 
-# Make sure Python can find our modules (they're in the same directory)
+# Make sure Python can find polymarket_agent/ modules (config, data_fetcher, etc.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Make sure Python can find shared/ (portfolio, strategies, etc.)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from config import (
     DEFAULT_MARKETS_TO_FETCH,
     DEFAULT_STARTING_CASH,
     PAPER_DEFAULT_DURATION_MINUTES,
 )
-from dashboard import start_in_thread as start_dashboard
+from shared.dashboard import start_in_thread as start_dashboard
 from data_fetcher import fetch_markets, fetch_price_history
 from data_storage import (
     save_markets, load_markets, markets_cache_exists,
     save_price_history, load_price_history, price_cache_exists,
 )
-from portfolio import Portfolio
-from risk_manager import RiskManager
-from backtest_engine import BacktestEngine
+from shared.portfolio import Portfolio
+from shared.risk_manager import RiskManager
+from shared.backtest_engine import BacktestEngine
 from paper_trader import PaperTrader
-import metrics as metrics_module
+from shared import metrics as metrics_module
 
 # Import all available strategies
-from strategies.momentum import MomentumStrategy
-from strategies.mean_reversion import MeanReversionStrategy
-from strategies.random_baseline import RandomBaselineStrategy
-from strategies.rsi import RSIStrategy
+from shared.strategies.momentum import MomentumStrategy
+from shared.strategies.mean_reversion import MeanReversionStrategy
+from shared.strategies.random_baseline import RandomBaselineStrategy
+from shared.strategies.rsi import RSIStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -168,14 +170,7 @@ def _sanitize_name(name: str) -> str:
 def load_data_for_backtest(num_markets: int, no_fetch: bool):
     """
     Fetch or load markets and their price histories for backtesting.
-
-    If --no-fetch is set, use cached CSVs only.
-    Otherwise, fetch from API and cache results.
-
-    Returns:
-        (markets, price_data) where price_data is dict of token_id → [PriceBar]
     """
-    # ---- Markets ----
     if no_fetch and markets_cache_exists():
         print("Loading markets from cache (--no-fetch)...")
         markets = load_markets()[:num_markets]
@@ -196,7 +191,6 @@ def load_data_for_backtest(num_markets: int, no_fetch: bool):
 
     print(f"\nLoaded {len(markets)} markets.")
 
-    # ---- Price histories ----
     price_data = {}
 
     for market in markets:
@@ -227,18 +221,15 @@ def load_data_for_backtest(num_markets: int, no_fetch: bool):
 
 
 # ---------------------------------------------------------------------------
-# Interactive setup (used when the script is run with no arguments)
+# Interactive setup
 # ---------------------------------------------------------------------------
 
 def interactive_setup() -> argparse.Namespace:
     """
     Prompt the user for all settings one by one.
     Called automatically when main.py is run with no arguments.
-    Returns an argparse.Namespace identical to what the CLI parser would produce.
     """
     from datetime import datetime, timezone, timedelta
-
-    # ── Helpers ─────────────────────────────────────────────────────────────
 
     BOLD  = "\033[1m"
     CYAN  = "\033[96m"
@@ -246,11 +237,6 @@ def interactive_setup() -> argparse.Namespace:
     RESET = "\033[0m"
 
     def pick(prompt, options):
-        """
-        Print a numbered menu and return the value of the chosen option.
-        options: list of (label, description, value) tuples.
-        User can only select by entering the number shown on screen.
-        """
         print(f"\n{BOLD}{prompt}{RESET}")
         for i, (label, desc, _) in enumerate(options, 1):
             line = f"  {i}. {CYAN}{label}{RESET}"
@@ -264,15 +250,11 @@ def interactive_setup() -> argparse.Namespace:
                 return value
             print(f"  Please enter a number from 1 to {len(options)}.")
 
-    # ── Header ───────────────────────────────────────────────────────────────
-
     print()
     print(BOLD + CYAN + "=" * 55 + RESET)
     print(BOLD + CYAN + "  BurryBot — Interactive Setup" + RESET)
     print(BOLD + CYAN + "=" * 55 + RESET)
     print(DIM + "  (Run with --help to see all CLI flags instead)" + RESET)
-
-    # ── Strategy ─────────────────────────────────────────────────────────────
 
     strategy = pick("Strategy:", [
         ("momentum",        "Buy on uptrends, sell on downtrends",             "momentum"),
@@ -281,14 +263,10 @@ def interactive_setup() -> argparse.Namespace:
         ("random_baseline", "Random trades — performance floor benchmark",     "random_baseline"),
     ])
 
-    # ── Mode ─────────────────────────────────────────────────────────────────
-
     mode = pick("Mode:", [
         ("paper",    "Live prices, simulated trades — no real money",    "paper"),
         ("backtest", "Replay historical price data (fast, no network)",  "backtest"),
     ])
-
-    # ── Markets ──────────────────────────────────────────────────────────────
 
     markets = pick("Markets to watch:", [
         ("5",  "quick run, fewer signals",           5),
@@ -298,8 +276,6 @@ def interactive_setup() -> argparse.Namespace:
         ("50", "maximum",                            50),
     ])
 
-    # ── Starting cash ────────────────────────────────────────────────────────
-
     cash = pick("Starting virtual cash (USDC):", [
         ("$500",    "",              500.0),
         ("$1,000",  "default",       1000.0),
@@ -307,15 +283,11 @@ def interactive_setup() -> argparse.Namespace:
         ("$5,000",  "",              5000.0),
     ])
 
-    # ── Mode-specific options ────────────────────────────────────────────────
-
     duration  = PAPER_DEFAULT_DURATION_MINUTES
     dashboard = False
     no_fetch  = False
 
     if mode == "paper":
-
-        # Duration via end datetime
         print(f"\n{BOLD}Session end date/time:{RESET}")
         print(f"  Format : {CYAN}YYYYMMDDhhmm{RESET}  (ART — Buenos Aires time, UTC-3)")
         print(f"  Example: {DIM}202602241000{RESET}  = 24 Feb 2026 at 10:00am ART")
@@ -343,13 +315,10 @@ def interactive_setup() -> argparse.Namespace:
         ])
 
     else:  # backtest
-
         no_fetch = pick("Data source:", [
             ("Fetch fresh", "download latest data from Polymarket API", False),
             ("Cache only",  "use previously downloaded CSVs (faster)",  True),
         ])
-
-    # ── Confirm ──────────────────────────────────────────────────────────────
 
     print()
     print(BOLD + "─" * 55 + RESET)
@@ -364,7 +333,6 @@ def interactive_setup() -> argparse.Namespace:
     else:
         print(f"  No-fetch : {'yes' if no_fetch else 'no'}")
 
-    # Build and display the equivalent CLI command
     cmd_parts = [
         "python main.py",
         f"--strategy {strategy}",
@@ -427,12 +395,10 @@ def main():
         print(f"  Duration : {args.duration} minutes")
     print("=" * 55)
 
-    # Instantiate the chosen strategy
     strategy_class = STRATEGY_MAP[args.strategy]
     strategy       = strategy_class()
     strategy.setup(params={})
 
-    # Instantiate portfolio and risk manager (shared by both modes)
     portfolio    = Portfolio(starting_cash=args.cash)
     risk_manager = RiskManager()
 
@@ -440,7 +406,6 @@ def main():
     # PAPER TRADING MODE
     # ----------------------------------------------------------------
     if args.mode == "paper":
-        # Determine instance name
         instance_name = (
             _sanitize_name(args.name)
             if args.name

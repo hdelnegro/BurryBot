@@ -24,7 +24,7 @@ from config import (
     GAMMA_SORT_FIELD,
     GAMMA_SORT_ASCENDING,
 )
-from models import Market, PriceBar
+from shared.models import Market, PriceBar
 
 
 # ---------------------------------------------------------------------------

@@ -1,33 +1,20 @@
 """
-backtest_engine.py — The main simulation loop.
+shared/backtest_engine.py — The main simulation loop.
 
-This is the "heart" of the system.  It steps through time bar by bar,
-calls the strategy, checks the risk manager, and executes trades.
-
-Flow:
-  for each market:
-    for each time bar i:
-      history = price_data[:i]      ← only past data (no peeking!)
-      signal  = strategy.generate_signal(...)
-      if BUY or SELL:
-        allowed, size, reason = risk_manager.check_signal(...)
-        if allowed:
-          portfolio.execute_buy/sell(...)
-      equity_curve.append(portfolio.total_value(...))
-
-After the loop:
-  metrics.compute_all_metrics(trades, equity_curve)
+Platform-agnostic: steps through time bar by bar, calls the strategy,
+checks the risk manager, and executes trades.
 """
 
+from datetime import datetime
 from typing import Dict, List
 
 import pandas as pd
 
-from models import Market, PriceBar, Signal
-from portfolio import Portfolio
-from risk_manager import RiskManager
-from strategy_base import StrategyBase
-import metrics as metrics_module
+from shared.models import Market, PriceBar, Signal
+from shared.portfolio import Portfolio
+from shared.risk_manager import RiskManager
+from shared.strategy_base import StrategyBase
+from shared import metrics as metrics_module
 
 
 class BacktestEngine:
@@ -49,9 +36,6 @@ class BacktestEngine:
         self.strategy     = strategy
         self.portfolio    = portfolio
         self.risk_manager = risk_manager
-
-        # Equity curve: one entry per bar across all markets
-        # (we record after processing each market's bar)
         self.equity_curve: List[float] = []
 
     def run(
@@ -59,22 +43,9 @@ class BacktestEngine:
         markets:    List[Market],
         price_data: Dict[str, List[PriceBar]],
     ) -> dict:
-        """
-        Execute the full backtest.
-
-        Args:
-            markets:    List of Market objects to simulate.
-            price_data: Dict of token_id → list of PriceBar objects.
-                        Only YES token data is required for now.
-
-        Returns:
-            A metrics dictionary (from metrics.compute_all_metrics).
-        """
         print(f"\nStarting backtest: {self.strategy.name}")
         print(f"Markets: {len(markets)} | Starting cash: ${self.portfolio.cash:.2f}\n")
 
-        # Build a DataFrame for each token so we can use pandas slicing
-        # Dict: token_id → DataFrame with datetime index and "price" column
         price_dfs: Dict[str, pd.DataFrame] = {}
         for token_id, bars in price_data.items():
             if not bars:
@@ -87,8 +58,6 @@ class BacktestEngine:
             df.sort_index(inplace=True)
             price_dfs[token_id] = df
 
-        # Determine the maximum number of bars across all tokens
-        # (different markets have different amounts of history)
         max_bars = max((len(df) for df in price_dfs.values()), default=0)
         if max_bars == 0:
             print("ERROR: No price data available. Cannot run backtest.")
@@ -96,12 +65,7 @@ class BacktestEngine:
 
         print(f"Max time steps: {max_bars} bars per token")
 
-        # ----------------------------------------------------------------
-        # Main simulation loop: iterate bar by bar
-        # ----------------------------------------------------------------
         for bar_index in range(1, max_bars):
-            # At each bar, collect the current price of every open position
-            # so we can calculate portfolio value and risk exposure.
             current_prices: Dict[str, float] = {}
 
             for market in markets:
@@ -109,18 +73,14 @@ class BacktestEngine:
                 df = price_dfs.get(token_id)
 
                 if df is None or bar_index >= len(df):
-                    continue  # no data for this market at this time
+                    continue
 
-                # Current bar info
                 current_time  = df.index[bar_index]
                 current_price = float(df["price"].iloc[bar_index])
-
                 current_prices[token_id] = current_price
 
-                # Price history UP TO (but not including) the current bar
                 history = df.iloc[:bar_index]
 
-                # Ask the strategy what to do
                 signal = self.strategy.generate_signal(
                     token_id      = token_id,
                     price_history = history,
@@ -128,7 +88,6 @@ class BacktestEngine:
                     current_time  = current_time,
                 )
 
-                # Ask the risk manager if the trade is safe
                 allowed, trade_size, reason = self.risk_manager.check_signal(
                     signal         = signal,
                     portfolio      = self.portfolio,
@@ -138,7 +97,6 @@ class BacktestEngine:
                 if not allowed:
                     continue
 
-                # Execute the trade
                 if signal.action == "BUY":
                     trade = self.portfolio.execute_buy(
                         signal          = signal,
@@ -158,13 +116,9 @@ class BacktestEngine:
                     if trade:
                         self.strategy.on_trade_executed(trade)
 
-            # Record equity after processing all markets for this bar
             pv = self.portfolio.total_value(current_prices)
             self.equity_curve.append(pv)
 
-        # ----------------------------------------------------------------
-        # Force-close all remaining positions at final prices
-        # ----------------------------------------------------------------
         final_prices: Dict[str, float] = {}
         for token_id, df in price_dfs.items():
             if len(df) > 0:
@@ -172,11 +126,7 @@ class BacktestEngine:
 
         self._close_all_positions(final_prices)
 
-        # ----------------------------------------------------------------
-        # Compute and return metrics
-        # ----------------------------------------------------------------
         final_value = self.portfolio.total_value(final_prices)
-
         return metrics_module.compute_all_metrics(
             trades        = self.portfolio.trade_log,
             equity_curve  = self.equity_curve,
@@ -185,21 +135,11 @@ class BacktestEngine:
         )
 
     def _close_all_positions(self, final_prices: Dict[str, float]) -> None:
-        """
-        Liquidate all remaining open positions at the end of the backtest.
-
-        This is needed so the final portfolio value reflects reality:
-        if we're holding tokens, they have a value — we "cash out" at the
-        last known price.
-        """
         open_tokens = list(self.portfolio.positions.keys())
-
         if not open_tokens:
             return
 
         print(f"\nClosing {len(open_tokens)} remaining open position(s) at final prices...")
-
-        from datetime import datetime
         close_time = datetime.utcnow()
 
         for token_id in open_tokens:
@@ -209,8 +149,6 @@ class BacktestEngine:
 
             price = final_prices.get(token_id, pos.avg_cost)
 
-            # Build a synthetic SELL signal at the final price
-            from models import Signal
             sell_signal = Signal(
                 action     = "SELL",
                 token_id   = token_id,

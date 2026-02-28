@@ -19,13 +19,16 @@ BurryBot/
 │   └── venv/                # Minimal venv for running dashboard standalone
 │
 ├── polymarket_agent/        # Polymarket platform-specific code
-│   ├── venv/                # Full venv (requests, pandas, numpy, flask, etc.)
+│   ├── venv/                # Full venv (requests, pandas, numpy, flask, py-clob-client, etc.)
 │   ├── data/                # CSV cache + state_*.json files
-│   ├── config.py            # Polymarket API URLs + constants
+│   ├── config.py            # Polymarket API URLs + constants (incl. live trading settings)
 │   ├── data_fetcher.py      # Gamma API (market list) + CLOB API (prices)
 │   ├── data_storage.py      # CSV cache read/write
-│   ├── paper_trader.py      # Live polling loop; writes state_<name>.json
-│   ├── main.py              # Entry point (backtest + paper modes)
+│   ├── paper_trader.py      # Live polling loop; writes state_<name>.json; base for LiveTrader
+│   ├── live_trader.py       # Phase 3: real CLOB orders; inherits PaperTrader
+│   ├── wallet.py            # WalletAdapter ABC + MagicLinkWallet; wallet_from_env() factory
+│   ├── .env.example         # Credential template (copy to .env; .env is gitignored)
+│   ├── main.py              # Entry point (backtest + paper + live modes)
 │   └── status.py            # CLI snapshot; no venv needed
 │
 └── kalshi_agent/            # Kalshi platform-specific code
@@ -63,6 +66,12 @@ python main.py --strategy momentum --mode paper --duration 60 --dashboard
 # 5-minute BTC up/down markets (30-second poll, much faster trading)
 python main.py --strategy momentum --mode paper --market-type 5min --duration 60
 python main.py --strategy rsi --mode paper --market-type 5min --duration 30 --name btc5m
+
+# Live trading mode (Phase 3) — REAL money, real CLOB orders
+# Requires .env with POLY_PRIVATE_KEY + POLY_FUNDER_ADDRESS (copy from .env.example)
+# A confirmation prompt (must type YES) appears before any orders are placed
+python main.py --strategy momentum --mode live --markets 3 --duration 60
+python main.py --strategy momentum --mode live --markets 3 --duration 60 --dashboard
 
 # Check status of a running paper trading session (no venv needed)
 python status.py
@@ -115,16 +124,20 @@ BurryBot is a multi-platform prediction-market trading system. Platform-agnostic
 
 **Paper trading mode**: Polls live prices every 5 minutes, runs the strategy in real-time, executes simulated trades. After every tick writes `data/state_<name>.json` for the dashboard. Multiple instances (across platforms) can run simultaneously.
 
+**Live trading mode** (Polymarket only): Identical to paper trading but `LiveTrader` overrides `_run_tick()` to place real GTC limit orders via `py-clob-client`. Portfolio cash is seeded from the on-chain USDC balance. `wallet.py` handles authentication (Magic Link by default). All `py_clob_client` imports are lazy — they only trigger when `--mode live` is active.
+
 ### Data Flow
 
 ```
 Platform APIs → data_fetcher.py → data_storage.py (CSV cache in data/)
                                         ↓
-main.py → BacktestEngine / PaperTrader → strategy.generate_signal()
+main.py → BacktestEngine / PaperTrader / LiveTrader → strategy.generate_signal()
                                         ↓
                             shared/risk_manager.check_signal()
                                         ↓
-                            shared/portfolio.execute_buy/sell()
+                   [paper]  shared/portfolio.execute_buy/sell()   (simulated)
+                   [live]   wallet.py / ClobClient.create_and_post_order()
+                              → on fill → shared/portfolio.execute_buy/sell() (real price)
                                         ↓
                             shared/metrics.compute_all_metrics()
                                         ↓
@@ -148,6 +161,8 @@ main.py → BacktestEngine / PaperTrader → strategy.generate_signal()
 | `*/data_fetcher.py` | Platform API calls (market list, price history, latest price) |
 | `*/data_storage.py` | Saves/loads markets and price history as CSV files |
 | `*/paper_trader.py` | Live polling loop; writes `data/state_<name>.json` with `platform` field |
+| `polymarket_agent/live_trader.py` | Phase 3: `LiveTrader(PaperTrader)` — overrides `_run_tick()` and `run()` for real CLOB orders |
+| `polymarket_agent/wallet.py` | `WalletAdapter` ABC + `MagicLinkWallet`; `wallet_from_env()` reads `.env`; lazy `py_clob_client` import |
 | `*/main.py` | Platform entry point; sets up sys.path for both agent dir and shared/ |
 | `polymarket_agent/status.py` | CLI snapshot; reads most recent `data/state_*.json`; no venv needed |
 
@@ -201,8 +216,19 @@ pip install -r shared/requirements.txt
 # Or: pip install -r polymarket_agent/requirements.txt (already includes flask)
 ```
 
+### Live Trading Setup (Polymarket only)
+
+1. `cp polymarket_agent/.env.example polymarket_agent/.env`
+2. Fill in `POLY_PRIVATE_KEY` (proxy key from Polymarket account settings → Export Proxy Key)
+3. Fill in `POLY_FUNDER_ADDRESS` (your Polymarket wallet address)
+4. `python main.py --strategy momentum --mode live --markets 3 --duration 60`
+5. Type `YES` at the confirmation prompt to start
+
+No POL (gas) required — Magic Link (`POLY_WALLET_TYPE=magic`) uses a gasless relayer.
+`.env` is gitignored. Never commit it.
+
 ### Phase Flags
 
 Each agent's `config.py` has phase flags:
-- `PAPER_TRADING_ENABLED = True` (Phase 2 — current)
-- `LIVE_TRADING_ENABLED = False` (Phase 3 — not yet implemented; Kalshi requires RSA-PSS key signing)
+- `PAPER_TRADING_ENABLED = True` (Phase 2 — complete)
+- `LIVE_TRADING_ENABLED = True` (Phase 3 — complete for Polymarket; Kalshi requires RSA-PSS key signing)

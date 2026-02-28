@@ -43,6 +43,8 @@ from shared.portfolio import Portfolio
 from shared.risk_manager import RiskManager
 from shared.backtest_engine import BacktestEngine
 from paper_trader import PaperTrader, FiveMinPaperTrader
+# LiveTrader and wallet_from_env are imported lazily inside the live-mode block
+# to avoid importing py_clob_client (and its dependency chain) when not needed.
 from shared import metrics as metrics_module
 
 # Import all available strategies
@@ -95,11 +97,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--mode",
         type=str,
         default="backtest",
-        choices=["backtest", "paper"],
+        choices=["backtest", "paper", "live"],
         help=(
             "Execution mode (default: backtest):\n"
             "  backtest — simulate strategy on historical data\n"
-            "  paper    — run live with real prices, simulated money"
+            "  paper    — run live with real prices, simulated money\n"
+            "  live     — run live with real prices, REAL money (Phase 3)"
         ),
     )
 
@@ -396,7 +399,7 @@ def main():
         parser = build_arg_parser()
         args   = parser.parse_args()
 
-    mode_label = "Paper Trading" if args.mode == "paper" else "Backtesting"
+    mode_label = {"paper": "Paper Trading", "live": "Live Trading"}.get(args.mode, "Backtesting")
     market_type = getattr(args, "market_type", "standard")
 
     print()
@@ -409,6 +412,8 @@ def main():
     print(f"  Cash     : ${args.cash:.2f}")
     if args.mode == "paper":
         print(f"  Duration : {args.duration} minutes")
+    if args.mode == "live":
+        print(f"  *** REAL MONEY — orders will be placed on Polymarket ***")
     print("=" * 55)
 
     strategy_class = STRATEGY_MAP[args.strategy]
@@ -464,6 +469,86 @@ def main():
             metrics_module.print_results(results, strategy.name + " [Paper]")
         else:
             print("Paper trading session produced no results.")
+
+        print("Done.")
+        return
+
+    # ----------------------------------------------------------------
+    # LIVE TRADING MODE
+    # ----------------------------------------------------------------
+    if args.mode == "live":
+        instance_name = (
+            _sanitize_name(args.name)
+            if args.name
+            else f"live_{args.strategy}_{time.strftime('%H%M')}"
+        )
+
+        # Lazy imports — py_clob_client is only needed in live mode
+        from live_trader import LiveTrader
+        from wallet import wallet_from_env
+
+        # Load wallet + fetch real balance for the confirmation prompt
+        print("\nLoading wallet credentials from .env...")
+        try:
+            wallet = wallet_from_env()
+        except (ValueError, KeyError) as e:
+            print(f"\nERROR: Could not load wallet: {e}")
+            print("Copy .env.example to .env and fill in your credentials.")
+            sys.exit(1)
+
+        # Build a temporary client just to read the balance for the prompt
+        print("Connecting to Polymarket CLOB to read balance...")
+        try:
+            tmp_client = wallet.build_clob_client()
+            balance_info = tmp_client.get_balance_allowance(params={"asset_type": "USDC"})
+            real_balance = float(balance_info.get("balance", args.cash))
+        except Exception as e:
+            print(f"WARNING: Could not read balance ({e}). Will show after startup.")
+            real_balance = args.cash
+
+        # Confirmation prompt — must type YES explicitly
+        print()
+        print("!" * 55)
+        print("  WARNING: LIVE TRADING MODE")
+        print("  Real money will be spent on Polymarket.")
+        print("!" * 55)
+        print(f"  Strategy:        {args.strategy}")
+        print(f"  Markets:         {args.markets}")
+        print(f"  Duration:        {args.duration} min")
+        print(f"  Wallet:          {wallet.funder_address}")
+        print(f"  Balance (chain): ${real_balance:,.2f} USDC")
+        print(f"  Instance name:   {instance_name}")
+        print("!" * 55)
+        print()
+        confirm = input("Type YES to continue with live trading: ").strip()
+        if confirm != "YES":
+            print("Aborted — live trading not started.")
+            sys.exit(0)
+
+        if args.dashboard:
+            try:
+                from shared.dashboard import start_in_thread as start_dashboard
+                start_dashboard(host="127.0.0.1", port=5000)
+            except OSError:
+                print("Dashboard already running at http://localhost:5000")
+
+        portfolio = Portfolio(starting_cash=real_balance)
+
+        trader = LiveTrader(
+            wallet           = wallet,
+            strategy         = strategy,
+            portfolio        = portfolio,
+            risk_manager     = risk_manager,
+            num_markets      = args.markets,
+            duration_minutes = args.duration,
+            instance_name    = instance_name,
+        )
+        results = trader.run()
+
+        if results:
+            metrics_module.print_results(results, strategy.name + " [Live]")
+        else:
+            print("Live trading session produced no results.")
 
         print("Done.")
         return

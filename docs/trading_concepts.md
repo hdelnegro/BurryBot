@@ -67,7 +67,7 @@ BurryBot's paper trader monitors market end dates and force-closes any open posi
 
 Yes. On Polymarket you can trade either side of any market. Buying NO tokens is equivalent to betting against the event. A NO token priced at `0.28` means the market thinks there's only a 28% chance the event *doesn't* happen (equivalently, a 72% chance it does).
 
-BurryBot currently trades only YES tokens for simplicity. Adding NO token trading would require tracking which side of the market each position is on, but the strategy logic would remain identical.
+BurryBot trades both YES and NO tokens. The strategy generates independent signals for each side of every market, and the risk manager blocks a BUY on one side if the portfolio already holds the opposite side of the same market.
 
 ---
 
@@ -78,7 +78,7 @@ Slippage is the difference between the price you expected to trade at and the pr
 1. **Thin order books**: if you want to sell 1,000 shares and only 200 shares are bid at `0.60`, the remaining 800 fill at progressively worse prices (`0.59`, `0.58`, etc.).
 2. **Latency**: by the time your order reaches the exchange, someone else may have already taken the best available price.
 
-BurryBot's paper trading does not model slippage — all trades execute at the last fetched price. In live trading, slippage would reduce returns, particularly for large positions in low-volume markets.
+BurryBot's paper trading does not model slippage — all trades execute at the last fetched price. Live trading places GTC (Good-Til-Cancelled) limit orders, which naturally bound slippage: a BUY order will not fill above `price + LIVE_SLIPPAGE_TOLERANCE` (default: 2%), and a SELL order will not fill below `price - LIVE_SLIPPAGE_TOLERANCE`. If no counterparty is available within the tolerance band, the order remains open (or expires) rather than filling at an unexpectedly bad price.
 
 ---
 
@@ -113,10 +113,11 @@ Several real-world frictions are not modelled in paper trading:
 | Factor | Paper trading | Live trading |
 |--------|--------------|--------------|
 | Bid-ask spread | Ignored — trades at mid price | You pay the spread on every entry and exit |
-| Slippage | Ignored | Large orders move the price against you |
-| Liquidity | Assumed infinite | May not be able to fill at desired size |
+| Slippage | Ignored | GTC limit orders bounded by `LIVE_SLIPPAGE_TOLERANCE` (2%) |
+| Liquidity | Assumed infinite | Order may not fill if no counterparty is within tolerance |
 | Latency | Instant | Orders take time to reach the exchange |
-| Fees | Approximated | Exact fee schedule applies |
+| Fees | Approximated (`TRADE_FEE_RATE` in config) | Exact fee schedule applies |
+| Portfolio seed | Starts at configured `--cash` value | Seeded from actual on-chain USDC balance |
 
 This gap between paper and live performance is sometimes called the **paper trading illusion** — a strategy that looks profitable in simulation may break even or lose once real frictions are applied. The purpose of paper trading in BurryBot is to validate strategy *logic* and *behaviour*, not to produce exact predictions of live returns.
 

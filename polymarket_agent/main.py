@@ -122,11 +122,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--duration",
-        type=int,
+        type=_parse_duration,
         default=PAPER_DEFAULT_DURATION_MINUTES,
         help=(
-            f"[paper mode only] Session duration in minutes "
-            f"(default: {PAPER_DEFAULT_DURATION_MINUTES})"
+            f"[paper mode only] Session duration — either minutes (e.g. 60) or\n"
+            f"an end date in YYYYMMDDhhmm format (ART = UTC-3), e.g. 202602241000.\n"
+            f"Default: {PAPER_DEFAULT_DURATION_MINUTES} minutes."
         ),
     )
 
@@ -176,6 +177,47 @@ def _sanitize_name(name: str) -> str:
     """Keep only letters, digits, underscores, hyphens. Truncate to 40 chars."""
     clean = re.sub(r"[^a-zA-Z0-9_-]", "", name)
     return clean[:40] or "default"
+
+
+def _parse_duration(value: str) -> int:
+    """
+    Accept --duration as either:
+      - plain minutes:   60, 120, 1440
+      - end date/time:   YYYYMMDDhhmm  (ART = UTC-3, same as interactive mode)
+                         e.g. 202602241000 = 24 Feb 2026 at 10:00 ART
+    Returns duration in minutes as an int.
+    """
+    import argparse as _ap
+    from datetime import datetime, timezone, timedelta
+
+    # 12-digit all-numeric string → date format
+    if len(value) == 12 and value.isdigit():
+        try:
+            end_local = datetime.strptime(value, "%Y%m%d%H%M")
+            end_utc   = end_local.replace(tzinfo=timezone(timedelta(hours=-3)))
+            now_utc   = datetime.now(timezone.utc)
+            minutes   = int((end_utc - now_utc).total_seconds() / 60)
+            if minutes <= 0:
+                raise _ap.ArgumentTypeError(
+                    f"End date '{value}' is already in the past."
+                )
+            return minutes
+        except ValueError:
+            raise _ap.ArgumentTypeError(
+                f"Invalid date '{value}'. Use YYYYMMDDhhmm, e.g. 202602241000."
+            )
+
+    # Otherwise treat as plain integer minutes
+    try:
+        minutes = int(value)
+        if minutes <= 0:
+            raise _ap.ArgumentTypeError("Duration must be a positive number of minutes.")
+        return minutes
+    except ValueError:
+        raise _ap.ArgumentTypeError(
+            f"Invalid duration '{value}'. "
+            "Use minutes (e.g. 60) or YYYYMMDDhhmm (e.g. 202602241000)."
+        )
 
 
 # ---------------------------------------------------------------------------

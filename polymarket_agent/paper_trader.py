@@ -546,6 +546,7 @@ class PaperTrader:
             "updated_at":        now.isoformat(),
             "instance_name":     self.instance_name,
             "platform":          "polymarket",
+            "pid":               os.getpid(),
             "tick":              self.tick_count,
             "strategy":          self.strategy.name,
             "duration_minutes":  self.duration_minutes,

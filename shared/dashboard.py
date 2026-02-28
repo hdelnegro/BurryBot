@@ -1067,33 +1067,47 @@ async function pollInstances() {
     liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_return_pct)||0) - (parseFloat(a.portfolio.total_return_pct)||0));
   }
 
-  // Create or update all cards
-  for (const inst of instances) {
-    const gridId = inst.is_live ? 'active-grid' : 'expired-grid';
-    if (instanceMap.has(inst.name)) {
-      updateInstanceCard(inst);
-      // Move card to correct grid if live status changed
-      const card = instanceMap.get(inst.name).card;
-      const targetGrid = document.getElementById(gridId);
-      if (card.parentElement !== targetGrid) targetGrid.appendChild(card);
-    } else {
-      createInstanceCard(inst, gridId);
+  try {
+    // Create or update all cards
+    for (const inst of instances) {
+      const gridId = inst.is_live ? 'active-grid' : 'expired-grid';
+      if (instanceMap.has(inst.name)) {
+        updateInstanceCard(inst);
+        // Move card to correct grid if live status changed
+        const card = instanceMap.get(inst.name).card;
+        const targetGrid = document.getElementById(gridId);
+        if (card.parentElement !== targetGrid) targetGrid.appendChild(card);
+      } else {
+        createInstanceCard(inst, gridId);
+      }
     }
+
+    // Re-order active grid by sort selection (appendChild moves existing elements)
+    liveInsts.forEach(inst => {
+      const entry = instanceMap.get(inst.name);
+      if (entry && activeGrid) activeGrid.appendChild(entry.card);
+    });
+
+    emptyEl.style.display    = instances.length ? 'none' : 'block';
+    activeSec.style.display  = liveInsts.length  ? '' : 'none';
+    expiredSec.style.display = deadInsts.length  ? '' : 'none';
+
+    if (liveCountEl)  liveCountEl.textContent  = liveInsts.length;
+    if (totalCountEl) totalCountEl.textContent = instances.length;
+    if (lastRefEl)    lastRefEl.textContent     = 'updated ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  } catch (e) {
+    console.error('pollInstances card error:', e);
+    // Show inline banner so the error is visible without opening devtools
+    let errEl = document.getElementById('poll-error-banner');
+    if (!errEl) {
+      errEl = document.createElement('div');
+      errEl.id = 'poll-error-banner';
+      errEl.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#e53e3e;color:#fff;' +
+                            'padding:6px 14px;font-size:12px;z-index:9999;font-family:monospace;';
+      document.body.appendChild(errEl);
+    }
+    errEl.textContent = 'Dashboard error: ' + e.message + ' — check browser console';
   }
-
-  // Re-order active grid by return rank (appendChild moves existing elements)
-  liveInsts.forEach(inst => {
-    const entry = instanceMap.get(inst.name);
-    if (entry) activeGrid.appendChild(entry.card);
-  });
-
-  emptyEl.style.display    = instances.length ? 'none' : 'block';
-  activeSec.style.display  = liveInsts.length  ? '' : 'none';
-  expiredSec.style.display = deadInsts.length  ? '' : 'none';
-
-  if (liveCountEl)  liveCountEl.textContent  = liveInsts.length;
-  if (totalCountEl) totalCountEl.textContent = instances.length;
-  if (lastRefEl)    lastRefEl.textContent     = 'updated ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
 
   scheduleNext();
 }

@@ -836,6 +836,7 @@ OVERVIEW_HTML = """<!DOCTYPE html>
       <option value="return">Sort: Return</option>
       <option value="portfolio">Sort: Portfolio</option>
       <option value="created">Sort: Created</option>
+      <option value="name">Sort: Name</option>
     </select>
     <button id="launch-btn" onclick="location.href='/launch'">+ LAUNCH AGENT</button>
   </div>
@@ -1051,6 +1052,8 @@ async function pollInstances() {
     liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_value)||0) - (parseFloat(a.portfolio.total_value)||0));
   } else if (sortBy === 'created') {
     liveInsts.sort((a, b) => (a.session_start||'').localeCompare(b.session_start||''));
+  } else if (sortBy === 'name') {
+    liveInsts.sort((a, b) => (a.name||'').localeCompare(b.name||''));
   } else {
     liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_return_pct)||0) - (parseFloat(a.portfolio.total_return_pct)||0));
   }

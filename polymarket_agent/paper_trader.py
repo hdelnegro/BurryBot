@@ -99,15 +99,16 @@ class PaperTrader:
         print("-" * 55)
         sys.stdout.flush()
 
+        # Write an initial state file immediately so the dashboard card appears right away.
+        self.session_start = datetime.utcnow()
+        self.session_end   = self.session_start + timedelta(minutes=self.duration_minutes)
+        self._write_state(status="starting")
+
         print("\nFetching active markets...")
         self._refresh_markets(initial=True)
         if not self.markets:
             print("ERROR: No active markets found.")
             return {}
-
-        self.session_start = datetime.utcnow()
-        end_time = self.session_start + timedelta(minutes=self.duration_minutes)
-        self.session_end = end_time
         print(f"\nSession runs until {end_time.strftime('%H:%M:%S UTC')} "
               f"({self.duration_minutes} minutes from now)")
         print("Press Ctrl+C to stop early.\n")
@@ -496,10 +497,11 @@ class PaperTrader:
         except Exception:
             return None
 
-    def _write_state(self) -> None:
+    def _write_state(self, status: str = "running") -> None:
         """
         Write current session state to data/state_<name>.json atomically.
         Dashboard reads this file to refresh the display.
+        status: "starting" on first write before markets are fetched, "running" thereafter.
         """
         now = datetime.utcnow()
         elapsed   = (now - self.session_start).total_seconds() / 60 if self.session_start else 0
@@ -547,6 +549,7 @@ class PaperTrader:
             "instance_name":     self.instance_name,
             "platform":          "polymarket",
             "pid":               os.getpid(),
+            "status":            status,
             "tick":              self.tick_count,
             "strategy":          self.strategy.name,
             "duration_minutes":  self.duration_minutes,
@@ -652,14 +655,15 @@ class FiveMinPaperTrader(PaperTrader):
         print("-" * 55)
         sys.stdout.flush()
 
+        # Write an initial state file immediately so the dashboard card appears right away.
+        self.session_start = datetime.utcnow()
+        self.session_end   = self.session_start + timedelta(minutes=self.duration_minutes)
+        self._write_state(status="starting")
+
         self._refresh_markets(initial=True)
         if not self.markets:
             print("ERROR: No active 5-minute market found. Markets may be between intervals.")
             return {}
-
-        self.session_start = datetime.utcnow()
-        end_time = self.session_start + timedelta(minutes=self.duration_minutes)
-        self.session_end = end_time
         print(f"\nSession runs until {end_time.strftime('%H:%M:%S UTC')} "
               f"({self.duration_minutes} minutes from now)")
         print("Press Ctrl+C to stop early.\n")

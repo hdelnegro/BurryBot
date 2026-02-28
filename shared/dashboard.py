@@ -203,6 +203,7 @@ def api_instances():
             "is_live":         is_live,
             "platform":        data.get("platform", "polymarket"),
             "strategy":        data.get("strategy", name),
+            "status":          data.get("status", "running"),
             "session_start":   data.get("session_start"),
             "tick":            data.get("tick", 0),
             "elapsed_minutes": data.get("elapsed_minutes", 0),
@@ -932,7 +933,8 @@ function createInstanceCard(inst, gridId) {
   const tickInfo = live
     ? `Tick ${inst.tick} · ${fmtMin(inst.remaining_minutes)} remaining`
     : 'Session ended';
-  const platform = inst.platform || 'polymarket';
+  const platform   = inst.platform || 'polymarket';
+  const isStarting = live && (inst.status === 'starting');
 
   a.innerHTML = `
     <div class="card-header">
@@ -940,6 +942,7 @@ function createInstanceCard(inst, gridId) {
         <span class="dot ${live ? '' : 'dot-dead'}"></span>
         <span class="card-name">${inst.name}</span>
         <span class="${platformBadgeClass(platform)}">${platform}</span>
+        <span data-starting-badge style="background:rgba(251,139,30,.15);color:#fb8b1e;font-size:9px;font-weight:700;letter-spacing:.6px;padding:2px 7px;border-radius:2px;${isStarting ? '' : 'display:none'}">STARTING</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         ${!live ? `<button class="btn-delete" onclick="deleteCard(event,'${inst.name}')">Delete</button>` : ''}
@@ -996,6 +999,9 @@ function updateInstanceCard(inst) {
   else       { card.classList.remove('live'); card.classList.add('dead'); }
   const dot = card.querySelector('.dot');
   if (dot) { live ? dot.classList.remove('dot-dead') : dot.classList.add('dot-dead'); }
+
+  const startingBadge = card.querySelector('[data-starting-badge]');
+  if (startingBadge) startingBadge.style.display = (live && inst.status === 'starting') ? '' : 'none';
 
   const retPct = parseFloat(p.total_return_pct) || 0;
   const retEl  = card.querySelector('[data-return]');

@@ -1445,5 +1445,6 @@ if __name__ == "__main__":
     # Allow running standalone: python shared/dashboard.py
     print("Starting dashboard server (standalone mode)...")
     print("Discovering state files from all *_agent/data/ directories...")
+    print("\n  → http://127.0.0.1:5000\n")
     _redirect_werkzeug_to_file()
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)

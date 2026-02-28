@@ -444,7 +444,7 @@ def main():
         instance_name = (
             _sanitize_name(args.name)
             if args.name
-            else f"{args.strategy}_{time.strftime('%H%M')}"
+            else f"{args.strategy}_{time.strftime('%H%M%S')}"
         )
 
         if args.dashboard:
@@ -480,7 +480,7 @@ def main():
         instance_name = (
             _sanitize_name(args.name)
             if args.name
-            else f"live_{args.strategy}_{time.strftime('%H%M')}"
+            else f"live_{args.strategy}_{time.strftime('%H%M%S')}"
         )
 
         # Lazy imports — py_clob_client is only needed in live mode

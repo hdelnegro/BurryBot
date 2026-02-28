@@ -506,7 +506,7 @@ function timeLabel(iso) {
 }
 
 const STALE_SECONDS = 360;
-let isLive = true;
+let isLive = null;  // null so first setLiveStatus() call always runs
 let heartbeat = 0;
 let lastSuccessfulFetch = 0;
 

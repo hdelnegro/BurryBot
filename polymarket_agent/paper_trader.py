@@ -109,12 +109,12 @@ class PaperTrader:
         if not self.markets:
             print("ERROR: No active markets found.")
             return {}
-        print(f"\nSession runs until {end_time.strftime('%H:%M:%S UTC')} "
+        print(f"\nSession runs until {self.session_end.strftime('%H:%M:%S UTC')} "
               f"({self.duration_minutes} minutes from now)")
         print("Press Ctrl+C to stop early.\n")
         print("=" * 55)
 
-        while datetime.utcnow() < end_time and not _stop_requested:
+        while datetime.utcnow() < self.session_end and not _stop_requested:
             if self.tick_count > 0 and self.tick_count % MARKET_REFRESH_INTERVAL_TICKS == 0:
                 print("\n[Market Refresh] Re-fetching market list for new/expired markets...")
                 sys.stdout.flush()
@@ -125,7 +125,7 @@ class PaperTrader:
 
             next_tick = datetime.utcnow() + timedelta(seconds=PAPER_POLL_INTERVAL_SECONDS)
             while datetime.utcnow() < next_tick and not _stop_requested:
-                if datetime.utcnow() >= end_time:
+                if datetime.utcnow() >= self.session_end:
                     break
                 time.sleep(5)
 
@@ -665,12 +665,12 @@ class FiveMinPaperTrader(PaperTrader):
         if not self.markets:
             print("ERROR: No active 5-minute market found. Markets may be between intervals.")
             return {}
-        print(f"\nSession runs until {end_time.strftime('%H:%M:%S UTC')} "
+        print(f"\nSession runs until {self.session_end.strftime('%H:%M:%S UTC')} "
               f"({self.duration_minutes} minutes from now)")
         print("Press Ctrl+C to stop early.\n")
         print("=" * 55)
 
-        while datetime.utcnow() < end_time and not _stop_requested:
+        while datetime.utcnow() < self.session_end and not _stop_requested:
             if self.tick_count > 0 and self.tick_count % FIVE_MIN_MARKET_REFRESH_TICKS == 0:
                 self._refresh_markets(initial=False)
 
@@ -679,7 +679,7 @@ class FiveMinPaperTrader(PaperTrader):
 
             next_tick = datetime.utcnow() + timedelta(seconds=FIVE_MIN_POLL_INTERVAL_SECONDS)
             while datetime.utcnow() < next_tick and not _stop_requested:
-                if datetime.utcnow() >= end_time:
+                if datetime.utcnow() >= self.session_end:
                     break
                 time.sleep(5)
 

@@ -1,6 +1,6 @@
 # BurryBot
 
-A trading strategy research framework for [Polymarket](https://polymarket.com), a prediction market platform where people trade on the probability of real-world events. BurryBot lets you write, backtest, and paper-trade strategies against Polymarket's live and historical price data — without ever touching real money until you're ready.
+A trading strategy research framework for [Polymarket](https://polymarket.com), a prediction market platform where people trade on the probability of real-world events. BurryBot lets you write, backtest, paper-trade, and live-trade strategies against Polymarket's live and historical price data — progressing from simulation to real orders at your own pace.
 
 ---
 
@@ -14,11 +14,13 @@ When a market resolves, YES tokens pay out $1.00 if the event happened, $0.00 if
 
 ## What BurryBot Does
 
-BurryBot is a strategy research platform with two execution modes:
+BurryBot is a strategy research platform with three execution modes:
 
 **Backtest mode** downloads historical price data from Polymarket's public API, caches it locally, and simulates a strategy's trading decisions bar-by-bar through that history. At the end it calculates performance metrics — return, Sharpe ratio, drawdown, win rate — so you can evaluate how a strategy would have performed.
 
 **Paper trading mode** runs a strategy on live, real-time prices fetched directly from Polymarket every few minutes, but executes all trades in a simulated portfolio. No real money is involved. This lets you observe strategy behaviour on live markets before committing capital.
+
+**Live trading mode** is identical to paper trading in structure, but wires real orders through Polymarket's CLOB API via `py-clob-client`. The portfolio is seeded from the actual on-chain USDC balance, and every approved signal places a GTC limit order on the exchange. A confirmation prompt and geo-block check guard against accidental activation.
 
 The project is structured so that adding a new strategy requires writing only one file and registering it in one place. Everything else — data fetching, risk management, portfolio accounting, and metrics — is handled by the framework.
 
@@ -60,9 +62,30 @@ python dashboard.py
 python status.py
 ```
 
+### Live Trading (Phase 3)
+
+Live trading places real orders on Polymarket using your actual USDC balance. Before running, set up your credentials:
+
+```bash
+# 1. Copy the credentials template
+cp .env.example .env
+
+# 2. Fill in .env:
+#    POLY_PRIVATE_KEY    — proxy signing key from Polymarket account settings → Export Proxy Key
+#    POLY_FUNDER_ADDRESS — your Polymarket wallet address
+
+# 3. Run with --mode live (a confirmation prompt will appear before any orders are placed)
+python main.py --strategy momentum --mode live --markets 3 --duration 60
+
+# Run with the dashboard to monitor in real time
+python main.py --strategy momentum --mode live --markets 3 --duration 60 --dashboard
+```
+
+The default wallet type is `magic` (Polymarket.com email account), which uses a gasless relayer — no POL token is needed for gas.
+
 Available strategies: `momentum`, `mean_reversion`, `rsi`, `random_baseline`
 
-All configuration (API URLs, position sizing limits, strategy parameters) lives in `config.py`.
+All configuration (API URLs, position sizing limits, strategy parameters, live trading constants) lives in `config.py`.
 
 For an explanation of the performance metrics (Sharpe ratio, max drawdown, win rate) and strategy concepts (momentum, mean reversion, RSI), see [docs/trading_concepts.md](docs/trading_concepts.md).
 
@@ -78,9 +101,9 @@ For an explanation of the performance metrics (Sharpe ratio, max drawdown, win r
 
 **requests** — HTTP calls to Polymarket's two public APIs. No authentication is needed for read-only historical data. The fetcher wraps all calls in a retry loop to handle transient network failures gracefully.
 
-**py-clob-client** — The official Polymarket Python client, included in dependencies for Phase 3 (live trading). It is not used yet, but is the intended interface for placing real orders via Polymarket's Central Limit Order Book (CLOB).
+**py-clob-client** — The official Polymarket Python client, used in live trading mode (Phase 3) to authenticate and submit real GTC limit orders via Polymarket's Central Limit Order Book (CLOB). Its dependency chain (`eip712_structs`, etc.) is imported lazily — only when `--mode live` is active — so backtest and paper trading modes have no additional requirements.
 
-**python-dotenv** — Included for Phase 3, when API credentials will be needed for authenticated trading operations.
+**python-dotenv** — Used in live trading mode to load wallet credentials (`POLY_PRIVATE_KEY`, `POLY_FUNDER_ADDRESS`) from a `.env` file, keeping secrets out of the codebase.
 
 **CSV for caching** — Rather than a database, historical price data is cached as plain CSV files. This keeps the project dependency-free for data storage, makes the cache human-readable and easy to inspect, and is fast enough for the volumes involved (thousands of price bars per market).
 
@@ -106,24 +129,34 @@ Polymarket APIs
       │
       ├──► BacktestEngine   ←— bar-by-bar simulation loop (backtest mode)
       │
-      └──► PaperTrader      ←— live polling loop (paper trading mode)
+      ├──► PaperTrader      ←— live polling loop (paper trading mode)
+      │         │
+      │         ├──► strategy.generate_signal()    ←— strategy decides BUY / SELL / HOLD
+      │         │           │
+      │         │           ▼
+      │         │    risk_manager.check_signal()   ←— gates the trade; sizes the position
+      │         │           │
+      │         │           ▼
+      │         │    portfolio.execute_buy/sell()  ←— updates cash, positions, trade log (simulated)
+      │         │           │
+      │         │           ▼
+      │         │    metrics.compute_all_metrics() ←— evaluates final performance
+      │         │
+      │         └──► data/state_<name>.json  ←— written after every tick
+      │
+      └──► LiveTrader        ←— inherits PaperTrader; overrides trade execution only (live mode)
                 │
-                ├──► strategy.generate_signal()   ←— strategy decides BUY / SELL / HOLD
-                │           │
-                │           ▼
-                │    risk_manager.check_signal()  ←— gates the trade; sizes the position
-                │           │
-                │           ▼
-                │    portfolio.execute_buy/sell() ←— updates cash, positions, trade log
-                │           │
-                │           ▼
-                │    metrics.compute_all_metrics() ←— evaluates final performance
+                ├──► wallet.py / ClobClient  ←— authenticates via proxy key; geo-block check
                 │
-                └──► data/state_<name>.json  ←— written after every tick (one file per instance)
-                           │
-                           ▼
-                     dashboard.py     ←— Flask server; overview of all instances + per-instance detail
-                     status.py        ←— CLI snapshot reader (python status.py)
+                ├──► strategy + risk_manager  ←— unchanged (reused from PaperTrader)
+                │
+                ├──► _execute_live_buy/sell() ←— places real GTC limit orders via CLOB API
+                │         fills confirmed → portfolio.execute_buy/sell() with real price
+                │
+                └──► data/state_<name>.json  ←— same format; live sessions visible on dashboard
+
+ dashboard.py     ←— Flask server; overview of all instances + per-instance detail
+ status.py        ←— CLI snapshot reader (python status.py)
 ```
 
 ### Why two separate engines?
@@ -169,7 +202,7 @@ Defines the five dataclasses that flow through the system:
 
 ### `config.py` — All configuration in one place
 
-All constants live here: API URLs, timeout and retry settings, default starting cash, position size limits, strategy parameters (momentum lookback, mean reversion Z-score threshold), and the minimum/maximum tradeable price range. Nothing else in the codebase hardcodes numbers. The idea is that changing the behaviour of the system means changing one file, not hunting through logic code.
+All constants live here: API URLs, timeout and retry settings, default starting cash, position size limits, strategy parameters (momentum lookback, mean reversion Z-score threshold), the minimum/maximum tradeable price range, and live trading settings (`POLY_CHAIN_ID`, `CLOB_HOST`, `LIVE_SLIPPAGE_TOLERANCE`, `LIVE_MIN_ORDER_SIZE_USDC`). Nothing else in the codebase hardcodes numbers. The idea is that changing the behaviour of the system means changing one file, not hunting through logic code.
 
 ### `data_fetcher.py` — API client
 
@@ -201,6 +234,31 @@ The main loop polls every 5 minutes (configurable as `PAPER_POLL_INTERVAL_SECOND
 **Dynamic market refresh**: Every `MARKET_REFRESH_INTERVAL_TICKS` ticks (default: every 12 ticks = 60 minutes), the trader re-fetches the top-volume active market list. This is necessary because Polymarket has short-lived markets — for example, "Bitcoin Up or Down - 2PM ET" opens and resolves every hour. Without periodic refreshes, a long-running session would end up watching only expired markets. The refresh detects newly listed markets (adds them and loads their history), and detects expired or resolved markets (removes them from the watchlist and force-closes any open positions). A set of `_known_token_ids` prevents re-downloading history for markets already seen, and `_expired_token_ids` prevents re-adding markets that have already been removed.
 
 The loop respects a Ctrl+C interrupt — it catches `SIGINT` and sets a flag that causes the loop to exit cleanly after the current tick, rather than crashing mid-trade.
+
+`PaperTrader` is also the base class for `LiveTrader` — the two share all market discovery, strategy, risk, and state-writing logic. Only the trade execution methods differ.
+
+### `wallet.py` — Wallet adapter
+
+Abstracts the credential and authentication layer for live trading behind a `WalletAdapter` interface. The only concrete implementation is `MagicLinkWallet` (Polymarket.com email account, `signature_type=1`), which derives L2 API credentials automatically from the proxy signing key on each startup and uses Polymarket's gasless relayer (no POL token needed for gas). `EOAWallet` and `GnosisSafeWallet` are stubs for future use.
+
+`wallet_from_env()` is a factory that reads `POLY_WALLET_TYPE`, `POLY_PRIVATE_KEY`, and `POLY_FUNDER_ADDRESS` from `.env` and returns the correct adapter. All `py_clob_client` imports are lazy (inside `build_clob_client()`) so they don't cascade to non-live modes.
+
+### `live_trader.py` — Live order execution
+
+`LiveTrader` inherits `PaperTrader` and overrides two things:
+
+**`run()`** — checks the geo-block endpoint (`polymarket.com/api/geoblock`) and the exchange contract allowance before starting the loop, and prints a live-mode banner.
+
+**`_run_tick()`** — mirrors `PaperTrader._run_tick()` exactly, except approved signals go to `_execute_live_buy()` / `_execute_live_sell()` instead of directly to `portfolio.execute_buy/sell()`. The live methods:
+
+1. Round the signal price to the market's tick size (fetched and cached per token)
+2. Call `ClobClient.create_and_post_order(OrderArgs(...))` with a GTC limit order
+3. On a confirmed fill (`status == "matched"` or `"live"`): call `portfolio.execute_buy/sell()` with the actual fill price, and store the CLOB `order_id` in `trade.trade_id` for traceability
+4. On an unmatched order: log and skip — no portfolio update
+
+After each tick's orders, `_resync_cash()` re-fetches the actual USDC balance from the chain to prevent the local cash balance from drifting out of sync.
+
+At startup, `_sync_portfolio_from_chain()` seeds the portfolio's cash from the real on-chain USDC balance and lists any pre-existing open positions (though it does not load them into the local portfolio automatically).
 
 ### `strategy_base.py` — Strategy interface
 
@@ -283,9 +341,9 @@ The codebase has explicit phase flags in `config.py`:
 
 - **Phase 1 (complete)** — Backtesting on historical data
 - **Phase 2 (complete)** — Paper trading on live prices with simulated money
-- **Phase 3 (planned)** — Live trading via `py-clob-client` with real orders (`LIVE_TRADING_ENABLED = False`)
+- **Phase 3 (complete)** — Live trading via `py-clob-client` with real orders (`LIVE_TRADING_ENABLED = True`)
 
-Phase 3 will require Polymarket API credentials and will use `py-clob-client` to submit actual orders through the CLOB.
+All three phases are now implemented. Potential next directions: partial-fill handling, FOK orders for immediate execution, EOA wallet support, and Kalshi live trading.
 
 ---
 

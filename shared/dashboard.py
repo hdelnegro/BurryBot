@@ -113,17 +113,20 @@ def _load_state(name: str):
         return None, False
 
     is_live = False
-    try:
-        from datetime import datetime, timezone
-        upd_str = str(data.get("updated_at", ""))
-        upd_str = re.sub(r"(\.\d{3})\d+", r"\1", upd_str)
-        if not upd_str.endswith("Z"):
-            upd_str += "Z"
-        upd_at  = datetime.fromisoformat(upd_str.replace("Z", "+00:00"))
-        age     = (datetime.now(timezone.utc) - upd_at).total_seconds()
-        is_live = age < STALE_SECONDS
-    except Exception:
-        pass
+    if data.get("status") == "finished":
+        pass  # explicitly finished — never live
+    else:
+        try:
+            from datetime import datetime, timezone
+            upd_str = str(data.get("updated_at", ""))
+            upd_str = re.sub(r"(\.\d{3})\d+", r"\1", upd_str)
+            if not upd_str.endswith("Z"):
+                upd_str += "Z"
+            upd_at  = datetime.fromisoformat(upd_str.replace("Z", "+00:00"))
+            age     = (datetime.now(timezone.utc) - upd_at).total_seconds()
+            is_live = age < STALE_SECONDS
+        except Exception:
+            pass
 
     return data, is_live
 

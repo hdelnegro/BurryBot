@@ -140,6 +140,7 @@ class PaperTrader:
             final_value  = final_value,
         )
 
+        self._write_state(status="finished")
         print("\nPaper trading session complete.")
         return results
 
@@ -692,6 +693,7 @@ class FiveMinPaperTrader(PaperTrader):
             starting_cash = self.portfolio.starting_cash,
             final_value   = final_value,
         )
+        self._write_state(status="finished")
         print("\nPaper trading session complete.")
         return results
 

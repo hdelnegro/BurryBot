@@ -207,6 +207,8 @@ def api_instances():
             "platform":        data.get("platform", "polymarket"),
             "strategy":        data.get("strategy", name),
             "status":          data.get("status", "running"),
+            "mode":            data.get("mode", "paper"),
+            "num_markets":     data.get("num_markets", 0),
             "session_start":   data.get("session_start"),
             "tick":            data.get("tick", 0),
             "elapsed_minutes": data.get("elapsed_minutes", 0),
@@ -656,14 +658,20 @@ async function refresh() {
 
     const metaEl = document.getElementById('header-meta');
     if (metaEl && data.strategy) {
-      const startStr   = data.session_start ? timeLabel(data.session_start) : '—';
+      const startStr    = data.session_start ? timeLabel(data.session_start) : '—';
       const platformStr = data.platform ? ` · ${data.platform}` : '';
-      metaEl.textContent = data.strategy + '  ·  started ' + startStr + platformStr;
+      const modeStr     = data.mode ? ` · ${data.mode.toUpperCase()}` : '';
+      const mktsStr     = data.num_markets ? ` · ${data.num_markets} markets` : '';
+      metaEl.textContent = data.strategy + modeStr + mktsStr + '  ·  started ' + startStr + platformStr;
     }
 
     try {
-      const updAt = new Date(String(data.updated_at || '').substring(0, 19) + 'Z');
-      setLiveStatus((Date.now() - updAt.getTime()) / 1000 < STALE_SECONDS);
+      if (data.status === 'finished') {
+        setLiveStatus(false);
+      } else {
+        const updAt = new Date(String(data.updated_at || '').substring(0, 19) + 'Z');
+        setLiveStatus((Date.now() - updAt.getTime()) / 1000 < STALE_SECONDS);
+      }
     } catch { setLiveStatus(false); }
 
     document.getElementById('last-update').textContent =
@@ -928,16 +936,21 @@ function createInstanceCard(inst, gridId) {
   a.className = 'instance-card' + (live ? ' live' : ' dead');
   a.href      = '/instance/' + inst.name;
 
-  const startStr = inst.session_start ? timeLabel(inst.session_start) : '—';
-  const retPct   = parseFloat(p.total_return_pct) || 0;
-  const winRate  = parseFloat(m.win_rate_pct) || 0;
-  const sharpe   = parseFloat(m.sharpe_ratio) || 0;
-  const maxdd    = parseFloat(m.max_drawdown_pct) || 0;
-  const tickInfo = live
+  const startStr   = inst.session_start ? timeLabel(inst.session_start) : '—';
+  const retPct     = parseFloat(p.total_return_pct) || 0;
+  const winRate    = parseFloat(m.win_rate_pct) || 0;
+  const sharpe     = parseFloat(m.sharpe_ratio) || 0;
+  const maxdd      = parseFloat(m.max_drawdown_pct) || 0;
+  const tickInfo   = live
     ? `Tick ${inst.tick} · ${fmtMin(inst.remaining_minutes)} remaining`
     : 'Session ended';
   const platform   = inst.platform || 'polymarket';
   const isStarting = live && (inst.status === 'starting');
+  const mode       = inst.mode || 'paper';
+  const numMkts    = inst.num_markets || 0;
+  const modeBadge  = mode === 'live'
+    ? `<span style="background:rgba(255,67,61,.15);color:#ff433d;font-size:9px;font-weight:700;letter-spacing:.6px;padding:2px 7px;border-radius:2px;">LIVE</span>`
+    : `<span style="background:rgba(74,246,195,.1);color:#4af6c3;font-size:9px;font-weight:700;letter-spacing:.6px;padding:2px 7px;border-radius:2px;">PAPER</span>`;
 
   a.innerHTML = `
     <div class="card-header">
@@ -945,6 +958,7 @@ function createInstanceCard(inst, gridId) {
         <span class="dot ${live ? '' : 'dot-dead'}"></span>
         <span class="card-name">${inst.name}</span>
         <span class="${platformBadgeClass(platform)}">${platform}</span>
+        ${modeBadge}
         <span data-starting-badge style="background:rgba(251,139,30,.15);color:#fb8b1e;font-size:9px;font-weight:700;letter-spacing:.6px;padding:2px 7px;border-radius:2px;${isStarting ? '' : 'display:none'}">STARTING</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
@@ -952,7 +966,7 @@ function createInstanceCard(inst, gridId) {
         <span class="card-arrow">&#8594;</span>
       </div>
     </div>
-    <div class="card-meta">${inst.strategy}  ·  started ${startStr}</div>
+    <div class="card-meta" data-meta>${inst.strategy}  ·  ${numMkts} markets  ·  started ${startStr}</div>
     <div class="card-stats">
       <div>
         <div class="card-stat-label">Portfolio</div>
@@ -1005,6 +1019,13 @@ function updateInstanceCard(inst) {
 
   const startingBadge = card.querySelector('[data-starting-badge]');
   if (startingBadge) startingBadge.style.display = (live && inst.status === 'starting') ? '' : 'none';
+
+  const metaEl = card.querySelector('[data-meta]');
+  if (metaEl) {
+    const startStr2 = inst.session_start ? timeLabel(inst.session_start) : '—';
+    const numMkts2  = inst.num_markets || 0;
+    metaEl.textContent = `${inst.strategy}  ·  ${numMkts2} markets  ·  started ${startStr2}`;
+  }
 
   const retPct = parseFloat(p.total_return_pct) || 0;
   const retEl  = card.querySelector('[data-return]');

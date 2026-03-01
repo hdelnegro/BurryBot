@@ -73,6 +73,8 @@ class PaperTrader:
         self.duration_minutes = duration_minutes
         self.instance_name    = instance_name or "default"
 
+        self._trading_mode    = "paper"
+
         self.price_history: Dict[str, List[PriceBar]] = {}
         self.markets: List[Market] = []
         self.equity_curve: List[float] = []
@@ -191,7 +193,7 @@ class PaperTrader:
 
             added = []
             for m in new_markets:
-                if len(self.markets) >= MAX_WATCHED_MARKETS:
+                if len(self.markets) >= self.num_markets:
                     break
                 self.markets.append(m)
                 added.append(m)
@@ -551,6 +553,8 @@ class PaperTrader:
             "platform":          "polymarket",
             "pid":               os.getpid(),
             "status":            status,
+            "mode":              self._trading_mode,
+            "num_markets":       len(self.markets) if self.markets else self.num_markets,
             "tick":              self.tick_count,
             "strategy":          self.strategy.name,
             "duration_minutes":  self.duration_minutes,

@@ -56,8 +56,8 @@ GAMMA_SORT_ASCENDING = False
 # Starting cash balance in USDC (dollar-equivalent)
 DEFAULT_STARTING_CASH = 1000.0
 
-# Maximum fraction of portfolio to put into a single trade (20% = 0.20)
-MAX_POSITION_SIZE_FRACTION = 0.20
+# Maximum fraction of portfolio to put into a single trade (5% = 0.05)
+MAX_POSITION_SIZE_FRACTION = 0.05
 
 # Maximum fraction of portfolio exposed to open positions at once (80% = 0.80)
 MAX_TOTAL_EXPOSURE_FRACTION = 0.80
@@ -86,11 +86,21 @@ RSI_PERIOD      = 14    # Number of bars used to compute RSI (standard = 14)
 RSI_OVERSOLD    = 30.0  # RSI below this → price fell too fast → BUY signal
 RSI_OVERBOUGHT  = 70.0  # RSI above this → price rose too fast → SELL signal
 
-# Minimum price to consider trading (avoids near-zero junk markets)
-MIN_TRADEABLE_PRICE = 0.01
+# Minimum price to consider trading (avoids near-zero and near-certain markets)
+# 0.05 = below 5% probability we don't buy; these rarely revert, they go to 0.
+MIN_TRADEABLE_PRICE = 0.05
 
-# Maximum price to consider trading on the BUY side (near-certain markets are boring)
-MAX_TRADEABLE_PRICE = 0.99
+# Maximum price to consider trading on the BUY side
+# 0.95 = above 95% probability we don't buy; same logic in reverse.
+MAX_TRADEABLE_PRICE = 0.95
+
+# Stop-loss: close any position that has fallen this far below its entry cost.
+# 0.30 = exit if down 30% from avg_cost (e.g. bought at 0.10, exit at 0.07).
+STOP_LOSS_PCT = 0.30
+
+# Time-based exit: close a non-profitable position after this many ticks.
+# 12 ticks × 5 min = 60 min. If reversion hasn't happened in an hour, it won't.
+MAX_HOLD_TICKS = 12
 
 
 # ---------------------------------------------------------------------------

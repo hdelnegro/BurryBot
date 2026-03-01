@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from config import (
     PAPER_POLL_INTERVAL_SECONDS, DATA_DIR,
     MARKET_REFRESH_INTERVAL_TICKS, MAX_WATCHED_MARKETS,
+    STOP_LOSS_PCT, MAX_HOLD_TICKS,
 )
 from data_fetcher import fetch_markets, fetch_price_history
 from shared.models import Market, PriceBar, Signal
@@ -319,6 +320,65 @@ class PaperTrader:
                 prices[token_id] = bars[-1].price
         return prices
 
+    def _force_close_position(
+        self,
+        token_id: str,
+        price: float,
+        timestamp: datetime,
+        reason: str,
+    ) -> None:
+        """Close a position immediately, bypassing the strategy. Used for stop-loss and time exits."""
+        pos = self.portfolio.positions.get(token_id)
+        if pos is None:
+            return
+        sell_signal = Signal(
+            action="SELL", token_id=token_id, outcome=pos.outcome,
+            price=price, reason=reason, confidence=1.0,
+        )
+        trade = self.portfolio.execute_sell(
+            signal=sell_signal, market_slug=pos.market_slug, timestamp=timestamp,
+        )
+        if trade:
+            sign = "+" if trade.pnl >= 0 else ""
+            print(f"  [EXIT] {reason}")
+            print(f"         {pos.market_slug[:55]} | PnL={sign}${trade.pnl:.2f}")
+            sys.stdout.flush()
+
+    def _apply_exits(self, current_prices: Dict[str, float]) -> None:
+        """
+        Check every open position for stop-loss and time-based exits.
+        Called at the start of each tick with last-known prices.
+
+        Stop-loss:       exit if position is down >= STOP_LOSS_PCT from avg_cost.
+        Time-based exit: exit if held >= MAX_HOLD_TICKS ticks without profit.
+        """
+        now = datetime.utcnow()
+        for token_id in list(self.portfolio.positions):
+            pos = self.portfolio.positions.get(token_id)
+            if pos is None:
+                continue
+
+            cur_price = current_prices.get(token_id, pos.avg_cost)
+
+            # Stop-loss
+            if pos.avg_cost > 0:
+                loss_pct = (pos.avg_cost - cur_price) / pos.avg_cost
+                if loss_pct >= STOP_LOSS_PCT:
+                    self._force_close_position(
+                        token_id, cur_price, now,
+                        f"Stop-loss: down {loss_pct:.1%} from entry ${pos.avg_cost:.4f}",
+                    )
+                    continue
+
+            # Time-based exit (only if not profitable)
+            ticks_held = (now - pos.opened_at).total_seconds() / PAPER_POLL_INTERVAL_SECONDS
+            unrealized_pnl = (cur_price - pos.avg_cost) * pos.shares
+            if ticks_held >= MAX_HOLD_TICKS and unrealized_pnl <= 0:
+                self._force_close_position(
+                    token_id, cur_price, now,
+                    f"Time exit: held {ticks_held:.0f} ticks, unrealized PnL ${unrealized_pnl:+.2f}",
+                )
+
     def _run_tick(self) -> None:
         from dataclasses import replace as dc_replace
 
@@ -328,6 +388,9 @@ class PaperTrader:
         print(f"[Tick {self.tick_count}] {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         print(f"{'='*55}")
         sys.stdout.flush()
+
+        # Apply stop-loss and time-based exits before fetching new prices
+        self._apply_exits(self._get_latest_prices())
 
         current_prices: Dict[str, float] = {}
 

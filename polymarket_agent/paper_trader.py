@@ -73,6 +73,8 @@ class PaperTrader:
         self.duration_minutes = duration_minutes
         self.instance_name    = instance_name or "default"
 
+        self._trading_mode    = "paper"
+
         self.price_history: Dict[str, List[PriceBar]] = {}
         self.markets: List[Market] = []
         self.equity_curve: List[float] = []
@@ -99,21 +101,22 @@ class PaperTrader:
         print("-" * 55)
         sys.stdout.flush()
 
+        # Write an initial state file immediately so the dashboard card appears right away.
+        self.session_start = datetime.utcnow()
+        self.session_end   = self.session_start + timedelta(minutes=self.duration_minutes)
+        self._write_state(status="starting")
+
         print("\nFetching active markets...")
         self._refresh_markets(initial=True)
         if not self.markets:
             print("ERROR: No active markets found.")
             return {}
-
-        self.session_start = datetime.utcnow()
-        end_time = self.session_start + timedelta(minutes=self.duration_minutes)
-        self.session_end = end_time
-        print(f"\nSession runs until {end_time.strftime('%H:%M:%S UTC')} "
+        print(f"\nSession runs until {self.session_end.strftime('%H:%M:%S UTC')} "
               f"({self.duration_minutes} minutes from now)")
         print("Press Ctrl+C to stop early.\n")
         print("=" * 55)
 
-        while datetime.utcnow() < end_time and not _stop_requested:
+        while datetime.utcnow() < self.session_end and not _stop_requested:
             if self.tick_count > 0 and self.tick_count % MARKET_REFRESH_INTERVAL_TICKS == 0:
                 print("\n[Market Refresh] Re-fetching market list for new/expired markets...")
                 sys.stdout.flush()
@@ -124,7 +127,7 @@ class PaperTrader:
 
             next_tick = datetime.utcnow() + timedelta(seconds=PAPER_POLL_INTERVAL_SECONDS)
             while datetime.utcnow() < next_tick and not _stop_requested:
-                if datetime.utcnow() >= end_time:
+                if datetime.utcnow() >= self.session_end:
                     break
                 time.sleep(5)
 
@@ -139,6 +142,7 @@ class PaperTrader:
             final_value  = final_value,
         )
 
+        self._write_state(status="finished")
         print("\nPaper trading session complete.")
         return results
 
@@ -189,7 +193,7 @@ class PaperTrader:
 
             added = []
             for m in new_markets:
-                if len(self.markets) >= MAX_WATCHED_MARKETS:
+                if len(self.markets) >= self.num_markets:
                     break
                 self.markets.append(m)
                 added.append(m)
@@ -496,10 +500,11 @@ class PaperTrader:
         except Exception:
             return None
 
-    def _write_state(self) -> None:
+    def _write_state(self, status: str = "running") -> None:
         """
         Write current session state to data/state_<name>.json atomically.
         Dashboard reads this file to refresh the display.
+        status: "starting" on first write before markets are fetched, "running" thereafter.
         """
         now = datetime.utcnow()
         elapsed   = (now - self.session_start).total_seconds() / 60 if self.session_start else 0
@@ -546,6 +551,10 @@ class PaperTrader:
             "updated_at":        now.isoformat(),
             "instance_name":     self.instance_name,
             "platform":          "polymarket",
+            "pid":               os.getpid(),
+            "status":            status,
+            "mode":              self._trading_mode,
+            "num_markets":       len(self.markets) if self.markets else self.num_markets,
             "tick":              self.tick_count,
             "strategy":          self.strategy.name,
             "duration_minutes":  self.duration_minutes,
@@ -651,20 +660,21 @@ class FiveMinPaperTrader(PaperTrader):
         print("-" * 55)
         sys.stdout.flush()
 
+        # Write an initial state file immediately so the dashboard card appears right away.
+        self.session_start = datetime.utcnow()
+        self.session_end   = self.session_start + timedelta(minutes=self.duration_minutes)
+        self._write_state(status="starting")
+
         self._refresh_markets(initial=True)
         if not self.markets:
             print("ERROR: No active 5-minute market found. Markets may be between intervals.")
             return {}
-
-        self.session_start = datetime.utcnow()
-        end_time = self.session_start + timedelta(minutes=self.duration_minutes)
-        self.session_end = end_time
-        print(f"\nSession runs until {end_time.strftime('%H:%M:%S UTC')} "
+        print(f"\nSession runs until {self.session_end.strftime('%H:%M:%S UTC')} "
               f"({self.duration_minutes} minutes from now)")
         print("Press Ctrl+C to stop early.\n")
         print("=" * 55)
 
-        while datetime.utcnow() < end_time and not _stop_requested:
+        while datetime.utcnow() < self.session_end and not _stop_requested:
             if self.tick_count > 0 and self.tick_count % FIVE_MIN_MARKET_REFRESH_TICKS == 0:
                 self._refresh_markets(initial=False)
 
@@ -673,7 +683,7 @@ class FiveMinPaperTrader(PaperTrader):
 
             next_tick = datetime.utcnow() + timedelta(seconds=FIVE_MIN_POLL_INTERVAL_SECONDS)
             while datetime.utcnow() < next_tick and not _stop_requested:
-                if datetime.utcnow() >= end_time:
+                if datetime.utcnow() >= self.session_end:
                     break
                 time.sleep(5)
 
@@ -687,6 +697,7 @@ class FiveMinPaperTrader(PaperTrader):
             starting_cash = self.portfolio.starting_cash,
             final_value   = final_value,
         )
+        self._write_state(status="finished")
         print("\nPaper trading session complete.")
         return results
 

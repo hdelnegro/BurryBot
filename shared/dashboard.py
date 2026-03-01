@@ -22,13 +22,19 @@ import json
 import logging
 import os
 import re
+import signal as _signal
+import subprocess
 import threading
 import time
+from datetime import datetime
 
-from flask import Flask, jsonify, Response, abort
+from flask import Flask, jsonify, redirect, request, Response, abort
 
 # BurryBot root dir (parent of shared/)
 _BURRYBOT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_AGENT_DIR     = os.path.join(_BURRYBOT_ROOT, 'polymarket_agent')
+_PYTHON_PATH   = os.path.join(_AGENT_DIR, 'venv', 'bin', 'python')
+_LOG_DIR       = os.path.join(_AGENT_DIR, 'logs')
 
 LOGS_DIR   = os.path.join(_BURRYBOT_ROOT, "shared", "logs")
 ACCESS_LOG = os.path.join(LOGS_DIR, "dashboard_access.log")
@@ -107,17 +113,20 @@ def _load_state(name: str):
         return None, False
 
     is_live = False
-    try:
-        from datetime import datetime, timezone
-        upd_str = str(data.get("updated_at", ""))
-        upd_str = re.sub(r"(\.\d{3})\d+", r"\1", upd_str)
-        if not upd_str.endswith("Z"):
-            upd_str += "Z"
-        upd_at  = datetime.fromisoformat(upd_str.replace("Z", "+00:00"))
-        age     = (datetime.now(timezone.utc) - upd_at).total_seconds()
-        is_live = age < STALE_SECONDS
-    except Exception:
-        pass
+    if data.get("status") == "finished":
+        pass  # explicitly finished — never live
+    else:
+        try:
+            from datetime import datetime, timezone
+            upd_str = str(data.get("updated_at", ""))
+            upd_str = re.sub(r"(\.\d{3})\d+", r"\1", upd_str)
+            if not upd_str.endswith("Z"):
+                upd_str += "Z"
+            upd_at  = datetime.fromisoformat(upd_str.replace("Z", "+00:00"))
+            age     = (datetime.now(timezone.utc) - upd_at).total_seconds()
+            is_live = age < STALE_SECONDS
+        except Exception:
+            pass
 
     return data, is_live
 
@@ -197,6 +206,9 @@ def api_instances():
             "is_live":         is_live,
             "platform":        data.get("platform", "polymarket"),
             "strategy":        data.get("strategy", name),
+            "status":          data.get("status", "running"),
+            "mode":            data.get("mode", "paper"),
+            "num_markets":     data.get("num_markets", 0),
             "session_start":   data.get("session_start"),
             "tick":            data.get("tick", 0),
             "elapsed_minutes": data.get("elapsed_minutes", 0),
@@ -330,10 +342,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div id="header-meta" style="font-size:10px;color:var(--muted);margin-top:3px;">connecting…</div>
     </div>
   </div>
-  <div id="status-pill">
-    <span id="last-update">connecting…</span>
-    <span style="color:var(--border);margin:0 4px;">|</span>
-    <span style="display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);"><span class="dot" id="live-dot"></span>hb:<span id="hb-count">0</span></span>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <button id="finish-btn" style="display:none;background:none;border:1px solid #ff433d;color:#ff433d;cursor:pointer;font-family:inherit;font-size:11px;font-weight:700;letter-spacing:1px;padding:5px 12px;border-radius:2px;" onclick="finishSession()">FINISH SESSION</button>
+    <div id="status-pill">
+      <span id="last-update">connecting…</span>
+      <span style="color:var(--border);margin:0 4px;">|</span>
+      <span style="display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);"><span class="dot" id="live-dot"></span>hb:<span id="hb-count">0</span></span>
+    </div>
   </div>
 </header>
 
@@ -497,21 +512,24 @@ function timeLabel(iso) {
 }
 
 const STALE_SECONDS = 360;
-let isLive = true;
+let isLive = null;  // null so first setLiveStatus() call always runs
 let heartbeat = 0;
 let lastSuccessfulFetch = 0;
 
 function setLiveStatus(live) {
   if (isLive === live) return;
   isLive = live;
-  const dot    = document.getElementById('live-dot');
-  const banner = document.getElementById('session-ended-banner');
+  const dot       = document.getElementById('live-dot');
+  const banner    = document.getElementById('session-ended-banner');
+  const finishBtn = document.getElementById('finish-btn');
   if (live) {
     dot?.classList.remove('dot-dead');
-    if (banner) banner.style.display = 'none';
+    if (banner)    banner.style.display    = 'none';
+    if (finishBtn) finishBtn.style.display = '';
   } else {
     dot?.classList.add('dot-dead');
-    if (banner) banner.style.display = 'block';
+    if (banner)    banner.style.display    = 'block';
+    if (finishBtn) finishBtn.style.display = 'none';
   }
 }
 
@@ -640,14 +658,20 @@ async function refresh() {
 
     const metaEl = document.getElementById('header-meta');
     if (metaEl && data.strategy) {
-      const startStr   = data.session_start ? timeLabel(data.session_start) : '—';
+      const startStr    = data.session_start ? timeLabel(data.session_start) : '—';
       const platformStr = data.platform ? ` · ${data.platform}` : '';
-      metaEl.textContent = data.strategy + '  ·  started ' + startStr + platformStr;
+      const modeStr     = data.mode ? ` · ${data.mode.toUpperCase()}` : '';
+      const mktsStr     = data.num_markets ? ` · ${data.num_markets} markets` : '';
+      metaEl.textContent = data.strategy + modeStr + mktsStr + '  ·  started ' + startStr + platformStr;
     }
 
     try {
-      const updAt = new Date(String(data.updated_at || '').substring(0, 19) + 'Z');
-      setLiveStatus((Date.now() - updAt.getTime()) / 1000 < STALE_SECONDS);
+      if (data.status === 'finished') {
+        setLiveStatus(false);
+      } else {
+        const updAt = new Date(String(data.updated_at || '').substring(0, 19) + 'Z');
+        setLiveStatus((Date.now() - updAt.getTime()) / 1000 < STALE_SECONDS);
+      }
     } catch { setLiveStatus(false); }
 
     document.getElementById('last-update').textContent =
@@ -663,6 +687,21 @@ async function refresh() {
 
 function scheduleNext() {
   setTimeout(refresh, 1000);
+}
+
+async function finishSession() {
+  const finishBtn = document.getElementById('finish-btn');
+  if (finishBtn) { finishBtn.disabled = true; finishBtn.textContent = 'Sending…'; }
+  try {
+    const resp = await fetch('/api/finish/' + INSTANCE_NAME, { method: 'POST' });
+    if (resp.ok) {
+      if (finishBtn) finishBtn.textContent = 'Shutting down…';
+    } else {
+      if (finishBtn) { finishBtn.disabled = false; finishBtn.textContent = 'FINISH SESSION'; }
+    }
+  } catch (e) {
+    if (finishBtn) { finishBtn.disabled = false; finishBtn.textContent = 'FINISH SESSION'; }
+  }
 }
 
 refresh();
@@ -777,6 +816,24 @@ OVERVIEW_HTML = """<!DOCTYPE html>
       white-space: nowrap; flex-shrink: 0;
     }
     .btn-delete:hover { background: rgba(255,67,61,.08); color: var(--red); border-color: var(--red); }
+    #sort-select {
+      background: #111; color: #aaaaaa; border: 1px solid #333;
+      padding: 4px 8px; font-size: 11px; font-family: inherit;
+      border-radius: 2px; cursor: pointer;
+    }
+    #sort-select:focus { outline: none; border-color: var(--accent); }
+    #launch-btn {
+      background: var(--accent); color: #000; border: none;
+      padding: 6px 14px; font-size: 11px; font-family: inherit;
+      font-weight: 700; letter-spacing: 1px; cursor: pointer; border-radius: 2px;
+    }
+    #launch-btn:hover { background: #ffaa33; }
+    .btn-delete-all {
+      background: none; border: 1px solid #444; color: #888;
+      cursor: pointer; font-size: 10px; font-family: inherit;
+      padding: 2px 8px; border-radius: 2px; letter-spacing: .5px;
+    }
+    .btn-delete-all:hover { border-color: var(--red); color: var(--red); }
   </style>
 </head>
 <body>
@@ -787,6 +844,13 @@ OVERVIEW_HTML = """<!DOCTYPE html>
   <div id="header-right">
     <div id="instance-counts"><span id="live-count">0</span> live / <span id="total-count">0</span> total</div>
     <div id="last-refresh">—</div>
+    <select id="sort-select">
+      <option value="return">Sort: Return</option>
+      <option value="portfolio">Sort: Portfolio</option>
+      <option value="created">Sort: Created</option>
+      <option value="name">Sort: Name</option>
+    </select>
+    <button id="launch-btn" onclick="location.href='/launch'">+ LAUNCH AGENT</button>
   </div>
 </header>
 
@@ -801,7 +865,10 @@ OVERVIEW_HTML = """<!DOCTYPE html>
     <div id="active-grid" class="instances-grid"></div>
   </div>
   <div id="expired-section" class="section-wrap" style="display:none">
-    <div class="section-header">Expired Sessions</div>
+    <div class="section-header" style="display:flex;align-items:center;justify-content:space-between;">
+      <span>Expired Sessions</span>
+      <button class="btn-delete-all" onclick="deleteAllExpired()">DELETE ALL</button>
+    </div>
     <div id="expired-grid" class="instances-grid"></div>
   </div>
 </main>
@@ -869,15 +936,21 @@ function createInstanceCard(inst, gridId) {
   a.className = 'instance-card' + (live ? ' live' : ' dead');
   a.href      = '/instance/' + inst.name;
 
-  const startStr = inst.session_start ? timeLabel(inst.session_start) : '—';
-  const retPct   = parseFloat(p.total_return_pct) || 0;
-  const winRate  = parseFloat(m.win_rate_pct) || 0;
-  const sharpe   = parseFloat(m.sharpe_ratio) || 0;
-  const maxdd    = parseFloat(m.max_drawdown_pct) || 0;
-  const tickInfo = live
+  const startStr   = inst.session_start ? timeLabel(inst.session_start) : '—';
+  const retPct     = parseFloat(p.total_return_pct) || 0;
+  const winRate    = parseFloat(m.win_rate_pct) || 0;
+  const sharpe     = parseFloat(m.sharpe_ratio) || 0;
+  const maxdd      = parseFloat(m.max_drawdown_pct) || 0;
+  const tickInfo   = live
     ? `Tick ${inst.tick} · ${fmtMin(inst.remaining_minutes)} remaining`
     : 'Session ended';
-  const platform = inst.platform || 'polymarket';
+  const platform   = inst.platform || 'polymarket';
+  const isStarting = live && (inst.status === 'starting');
+  const mode       = inst.mode || 'paper';
+  const numMkts    = inst.num_markets || 0;
+  const modeBadge  = mode === 'live'
+    ? `<span style="background:rgba(255,67,61,.15);color:#ff433d;font-size:9px;font-weight:700;letter-spacing:.6px;padding:2px 7px;border-radius:2px;">LIVE</span>`
+    : `<span style="background:rgba(74,246,195,.1);color:#4af6c3;font-size:9px;font-weight:700;letter-spacing:.6px;padding:2px 7px;border-radius:2px;">PAPER</span>`;
 
   a.innerHTML = `
     <div class="card-header">
@@ -885,13 +958,15 @@ function createInstanceCard(inst, gridId) {
         <span class="dot ${live ? '' : 'dot-dead'}"></span>
         <span class="card-name">${inst.name}</span>
         <span class="${platformBadgeClass(platform)}">${platform}</span>
+        ${modeBadge}
+        <span data-starting-badge style="background:rgba(251,139,30,.15);color:#fb8b1e;font-size:9px;font-weight:700;letter-spacing:.6px;padding:2px 7px;border-radius:2px;${isStarting ? '' : 'display:none'}">STARTING</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         ${!live ? `<button class="btn-delete" onclick="deleteCard(event,'${inst.name}')">Delete</button>` : ''}
         <span class="card-arrow">&#8594;</span>
       </div>
     </div>
-    <div class="card-meta">${inst.strategy}  ·  started ${startStr}</div>
+    <div class="card-meta" data-meta>${inst.strategy}  ·  ${numMkts} markets  ·  started ${startStr}</div>
     <div class="card-stats">
       <div>
         <div class="card-stat-label">Portfolio</div>
@@ -942,6 +1017,16 @@ function updateInstanceCard(inst) {
   const dot = card.querySelector('.dot');
   if (dot) { live ? dot.classList.remove('dot-dead') : dot.classList.add('dot-dead'); }
 
+  const startingBadge = card.querySelector('[data-starting-badge]');
+  if (startingBadge) startingBadge.style.display = (live && inst.status === 'starting') ? '' : 'none';
+
+  const metaEl = card.querySelector('[data-meta]');
+  if (metaEl) {
+    const startStr2 = inst.session_start ? timeLabel(inst.session_start) : '—';
+    const numMkts2  = inst.num_markets || 0;
+    metaEl.textContent = `${inst.strategy}  ·  ${numMkts2} markets  ·  started ${startStr2}`;
+  }
+
   const retPct = parseFloat(p.total_return_pct) || 0;
   const retEl  = card.querySelector('[data-return]');
   if (retEl) { retEl.textContent = fmtPct(retPct); retEl.className = 'card-stat-value ' + colorClass(retPct); }
@@ -991,36 +1076,59 @@ async function pollInstances() {
   const liveInsts = instances.filter(i => i.is_live);
   const deadInsts = instances.filter(i => !i.is_live);
 
-  // Sort active sessions by return descending (highest return first)
-  liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_return_pct) || 0) - (parseFloat(a.portfolio.total_return_pct) || 0));
-
-  // Create or update all cards
-  for (const inst of instances) {
-    const gridId = inst.is_live ? 'active-grid' : 'expired-grid';
-    if (instanceMap.has(inst.name)) {
-      updateInstanceCard(inst);
-      // Move card to correct grid if live status changed
-      const card = instanceMap.get(inst.name).card;
-      const targetGrid = document.getElementById(gridId);
-      if (card.parentElement !== targetGrid) targetGrid.appendChild(card);
-    } else {
-      createInstanceCard(inst, gridId);
-    }
+  // Sort active sessions per combo box selection
+  const sortBy = (document.getElementById('sort-select') || {}).value || 'return';
+  if (sortBy === 'portfolio') {
+    liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_value)||0) - (parseFloat(a.portfolio.total_value)||0));
+  } else if (sortBy === 'created') {
+    liveInsts.sort((a, b) => (a.session_start||'').localeCompare(b.session_start||''));
+  } else if (sortBy === 'name') {
+    liveInsts.sort((a, b) => (a.name||'').localeCompare(b.name||''));
+  } else {
+    liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_return_pct)||0) - (parseFloat(a.portfolio.total_return_pct)||0));
   }
 
-  // Re-order active grid by return rank (appendChild moves existing elements)
-  liveInsts.forEach(inst => {
-    const entry = instanceMap.get(inst.name);
-    if (entry) activeGrid.appendChild(entry.card);
-  });
+  try {
+    // Create or update all cards
+    for (const inst of instances) {
+      const gridId = inst.is_live ? 'active-grid' : 'expired-grid';
+      if (instanceMap.has(inst.name)) {
+        updateInstanceCard(inst);
+        // Move card to correct grid if live status changed
+        const card = instanceMap.get(inst.name).card;
+        const targetGrid = document.getElementById(gridId);
+        if (card.parentElement !== targetGrid) targetGrid.appendChild(card);
+      } else {
+        createInstanceCard(inst, gridId);
+      }
+    }
 
-  emptyEl.style.display    = instances.length ? 'none' : 'block';
-  activeSec.style.display  = liveInsts.length  ? '' : 'none';
-  expiredSec.style.display = deadInsts.length  ? '' : 'none';
+    // Re-order active grid by sort selection (appendChild moves existing elements)
+    liveInsts.forEach(inst => {
+      const entry = instanceMap.get(inst.name);
+      if (entry && activeGrid) activeGrid.appendChild(entry.card);
+    });
 
-  if (liveCountEl)  liveCountEl.textContent  = liveInsts.length;
-  if (totalCountEl) totalCountEl.textContent = instances.length;
-  if (lastRefEl)    lastRefEl.textContent     = 'updated ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    emptyEl.style.display    = instances.length ? 'none' : 'block';
+    activeSec.style.display  = liveInsts.length  ? '' : 'none';
+    expiredSec.style.display = deadInsts.length  ? '' : 'none';
+
+    if (liveCountEl)  liveCountEl.textContent  = liveInsts.length;
+    if (totalCountEl) totalCountEl.textContent = instances.length;
+    if (lastRefEl)    lastRefEl.textContent     = 'updated ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  } catch (e) {
+    console.error('pollInstances card error:', e);
+    // Show inline banner so the error is visible without opening devtools
+    let errEl = document.getElementById('poll-error-banner');
+    if (!errEl) {
+      errEl = document.createElement('div');
+      errEl.id = 'poll-error-banner';
+      errEl.style.cssText = 'position:fixed;bottom:0;left:0;right:0;background:#e53e3e;color:#fff;' +
+                            'padding:6px 14px;font-size:12px;z-index:9999;font-family:monospace;';
+      document.body.appendChild(errEl);
+    }
+    errEl.textContent = 'Dashboard error: ' + e.message + ' — check browser console';
+  }
 
   scheduleNext();
 }
@@ -1032,7 +1140,6 @@ function scheduleNext() {
 async function deleteCard(event, name) {
   event.preventDefault();
   event.stopPropagation();
-  if (!confirm('Delete session "' + name + '"?\\nThis removes the state file permanently.')) return;
   try {
     const res = await fetch('/api/delete/' + name, { method: 'POST' });
     if (res.ok) {
@@ -1043,7 +1150,168 @@ async function deleteCard(event, name) {
   } catch (e) { /* ignore */ }
 }
 
+async function deleteAllExpired() {
+  if (!confirm('Delete all expired sessions?')) return;
+  try {
+    const res = await fetch('/api/delete-all-expired', { method: 'POST' });
+    if (res.ok) {
+      // Remove all dead cards immediately
+      for (const [name, entry] of instanceMap.entries()) {
+        if (entry.card.classList.contains('dead')) {
+          entry.card.remove();
+          instanceMap.delete(name);
+        }
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
 pollInstances();
+</script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# Launch Agent page HTML
+# ---------------------------------------------------------------------------
+
+LAUNCH_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BurryBot — Launch Agent</title>
+  <style>
+    :root {
+      --bg: #000000; --surface: #111111; --border: #1e1e1e;
+      --text: #ffffff; --muted: #707070; --green: #4af6c3;
+      --red: #ff433d; --accent: #ff8c00;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+    header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 14px 24px; display: flex; align-items: center;
+    }
+    header h1 { font-size: 16px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; }
+    .back-link { color: var(--muted); text-decoration: none; font-size: 12px; margin-right: 16px; }
+    .back-link:hover { color: var(--accent); }
+    main { padding: 32px 24px; max-width: 540px; }
+    .error-banner {
+      background: rgba(255,67,61,.12); border: 1px solid rgba(255,67,61,.4);
+      color: var(--red); padding: 8px 14px; margin-bottom: 20px;
+      border-radius: 2px; font-size: 12px;
+    }
+    .form-group { margin-bottom: 18px; }
+    label { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase;
+            letter-spacing: .8px; margin-bottom: 6px; }
+    select, input[type="text"], input[type="datetime-local"] {
+      width: 100%; background: var(--surface); color: var(--text);
+      border: 1px solid var(--border); padding: 8px 10px;
+      font-size: 13px; font-family: inherit; border-radius: 2px;
+    }
+    select:focus, input:focus { outline: none; border-color: var(--accent); }
+    .checkbox-row { display: flex; align-items: center; gap: 8px; }
+    .checkbox-row input[type="checkbox"] { width: auto; }
+    .hidden { display: none; }
+    .btn-submit {
+      width: 100%; background: var(--accent); color: #000; border: none;
+      padding: 10px; font-size: 13px; font-family: inherit;
+      font-weight: 700; letter-spacing: 1px; cursor: pointer; border-radius: 2px;
+      margin-top: 8px;
+    }
+    .btn-submit:hover { background: #ffaa33; }
+    .cancel-link { display: block; text-align: center; margin-top: 14px;
+                   color: var(--muted); text-decoration: none; font-size: 12px; }
+    .cancel-link:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+<header>
+  <a class="back-link" href="/">&#8592; Overview</a>
+  <h1>&#9889; BurryBot &#8212; Launch Agent</h1>
+</header>
+<main>
+  __ERROR_BANNER__
+  <form method="POST" action="/api/launch">
+    <div class="form-group">
+      <label>Strategy</label>
+      <select name="strategy">
+        <option value="momentum">momentum</option>
+        <option value="mean_reversion">mean_reversion</option>
+        <option value="rsi">rsi</option>
+        <option value="random_baseline">random_baseline</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Mode</label>
+      <select name="mode" id="mode-select" onchange="onModeChange()">
+        <option value="paper">paper</option>
+        <option value="backtest">backtest</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Markets</label>
+      <select name="markets">
+        <option value="5">5</option>
+        <option value="10">10</option>
+        <option value="20">20</option>
+        <option value="30">30</option>
+        <option value="50">50</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Starting Cash (USDC)</label>
+      <select name="cash">
+        <option value="500">500</option>
+        <option value="1000" selected>1000</option>
+        <option value="2000">2000</option>
+        <option value="5000">5000</option>
+      </select>
+    </div>
+    <div class="form-group paper-only" id="group-end-time">
+      <label>Session End Time</label>
+      <input type="datetime-local" name="end_time" id="end-time-input"/>
+    </div>
+    <div class="form-group paper-only" id="group-name">
+      <label>Instance Name (optional)</label>
+      <input type="text" name="name" placeholder="auto" maxlength="40"/>
+    </div>
+    <div class="form-group paper-only" id="group-market-type">
+      <label>Market Type</label>
+      <select name="market_type">
+        <option value="standard">standard</option>
+        <option value="5min">5min (BTC up/down)</option>
+      </select>
+    </div>
+    <div class="form-group backtest-only hidden" id="group-no-fetch">
+      <label>&nbsp;</label>
+      <div class="checkbox-row">
+        <input type="checkbox" name="no_fetch" id="no-fetch-cb"/>
+        <label for="no-fetch-cb" style="text-transform:none;letter-spacing:0;font-size:12px;">Use cached data only (--no-fetch)</label>
+      </div>
+    </div>
+    <button type="submit" class="btn-submit">LAUNCH</button>
+  </form>
+  <a class="cancel-link" href="/">CANCEL</a>
+</main>
+<script>
+function onModeChange() {
+  const mode = document.getElementById('mode-select').value;
+  document.querySelectorAll('.paper-only').forEach(el => el.classList.toggle('hidden', mode !== 'paper'));
+  document.querySelectorAll('.backtest-only').forEach(el => el.classList.toggle('hidden', mode !== 'backtest'));
+}
+// Pre-fill end time with +1 hour from now
+(function() {
+  const inp = document.getElementById('end-time-input');
+  if (!inp) return;
+  const d = new Date(Date.now() + 3600000);
+  const pad = n => String(n).padStart(2, '0');
+  inp.value = d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
+              'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+})();
 </script>
 </body>
 </html>
@@ -1084,6 +1352,110 @@ def api_delete(name: str):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/delete-all-expired", methods=["POST"])
+def api_delete_all_expired():
+    """Delete state files for all expired (stale) instances."""
+    deleted = 0
+    for name, path in _get_all_state_files():
+        _, is_live = _load_state(name)
+        if not is_live:
+            try:
+                os.remove(path)
+                deleted += 1
+            except OSError:
+                pass
+    return jsonify({"ok": True, "deleted": deleted})
+
+
+@app.route("/launch")
+def launch_page():
+    """Launch Agent form page."""
+    error = request.args.get("error", "")
+    if error == "invalid":
+        banner = '<div class="error-banner">Invalid parameters. Please check your inputs.</div>'
+    elif error == "past":
+        banner = '<div class="error-banner">End time must be in the future.</div>'
+    else:
+        banner = ""
+    html = LAUNCH_HTML.replace("__ERROR_BANNER__", banner)
+    resp = Response(html, mimetype="text/html")
+    return _no_cache(resp)
+
+
+@app.route("/api/launch", methods=["POST"])
+def api_launch():
+    """Validate form and spawn a detached agent subprocess."""
+    strategy     = request.form.get("strategy", "")
+    mode         = request.form.get("mode", "paper")
+    markets      = request.form.get("markets", "5")
+    cash         = request.form.get("cash", "1000")
+    end_time_str = request.form.get("end_time", "")
+    name         = re.sub(r"[^a-zA-Z0-9_-]", "", request.form.get("name", ""))[:40]
+    market_type  = request.form.get("market_type", "standard")
+    no_fetch     = request.form.get("no_fetch") == "on"
+
+    valid_strategies = {"momentum", "mean_reversion", "rsi", "random_baseline"}
+    valid_modes      = {"paper", "backtest"}
+    valid_markets    = {"5", "10", "20", "30", "50"}
+    valid_cash       = {"500", "1000", "2000", "5000"}
+    valid_mtypes     = {"standard", "5min"}
+
+    if (strategy not in valid_strategies or mode not in valid_modes
+            or markets not in valid_markets or cash not in valid_cash
+            or market_type not in valid_mtypes):
+        return redirect("/launch?error=invalid")
+
+    duration_minutes = None
+    if mode == "paper":
+        try:
+            end_dt = datetime.strptime(end_time_str, "%Y-%m-%dT%H:%M")
+            now_dt = datetime.now()
+            duration_minutes = int((end_dt - now_dt).total_seconds() / 60)
+            if duration_minutes <= 0:
+                return redirect("/launch?error=past")
+        except (ValueError, TypeError):
+            return redirect("/launch?error=invalid")
+
+    cmd = [_PYTHON_PATH, "main.py",
+           "--strategy", strategy, "--mode", mode,
+           "--markets", markets, "--cash", cash]
+    if mode == "paper":
+        cmd += ["--duration", str(duration_minutes), "--market-type", market_type]
+        if name:
+            cmd += ["--name", name]
+    elif mode == "backtest" and no_fetch:
+        cmd += ["--no-fetch"]
+
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    ts = int(time.time())
+    log_path = os.path.join(_LOG_DIR, f"launch_{strategy}_{mode}_{ts}.log")
+    with open(log_path, "w") as lf:
+        subprocess.Popen(cmd, cwd=_AGENT_DIR, stdout=lf, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+
+    return redirect("/")
+
+
+@app.route("/api/finish/<name>", methods=["POST"])
+def api_finish(name: str):
+    """Send SIGINT to a running paper trader to trigger graceful shutdown."""
+    if not re.match(r"^[a-zA-Z0-9_-]+$", name):
+        return jsonify({"error": "invalid name"}), 400
+    data, is_live = _load_state(name)
+    if not data or not is_live:
+        return jsonify({"error": "session not live"}), 404
+    pid = data.get("pid")
+    if not pid:
+        return jsonify({"error": "no pid in state file"}), 400
+    try:
+        os.kill(pid, _signal.SIGINT)
+        return jsonify({"ok": True})
+    except ProcessLookupError:
+        return jsonify({"error": "process not found"}), 404
+    except PermissionError:
+        return jsonify({"error": "permission denied"}), 403
+
+
 # ---------------------------------------------------------------------------
 # Public helper: start Flask in a daemon thread (called from agent main.py)
 # ---------------------------------------------------------------------------
@@ -1117,5 +1489,6 @@ if __name__ == "__main__":
     # Allow running standalone: python shared/dashboard.py
     print("Starting dashboard server (standalone mode)...")
     print("Discovering state files from all *_agent/data/ directories...")
+    print("\n  → http://127.0.0.1:5000\n")
     _redirect_werkzeug_to_file()
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)

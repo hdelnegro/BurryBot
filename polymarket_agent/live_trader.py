@@ -72,6 +72,7 @@ class LiveTrader(PaperTrader):
         """
         super().__init__(**kwargs)
         self.wallet = wallet
+        self._trading_mode    = "live"
         self._tick_size_cache: Dict[str, float] = {}
 
         print("\n[LiveTrader] Connecting to Polymarket CLOB API...")

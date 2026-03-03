@@ -1242,6 +1242,7 @@ LAUNCH_HTML = """<!DOCTYPE html>
         <option value="momentum">momentum</option>
         <option value="mean_reversion">mean_reversion</option>
         <option value="rsi">rsi</option>
+        <option value="overreaction_fade">overreaction_fade</option>
         <option value="random_baseline">random_baseline</option>
       </select>
     </div>

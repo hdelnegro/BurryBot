@@ -162,6 +162,21 @@ FIVE_MIN_RSI_PERIOD            = 7   # 7-period RSI for fast markets
 # Gamma API slug prefix for 5-min BTC up/down markets
 BTC_UPDOWN_5M_PREFIX = "btc-updown-5m"
 
+# ---------------------------------------------------------------------------
+# BTC 5-min momentum strategy parameters
+# ---------------------------------------------------------------------------
+FIVE_MIN_BTC_LOOKBACK          = 5     # recent resolved markets to weight
+FIVE_MIN_BTC_DECAY             = 0.75  # exponential decay for older markets
+FIVE_MIN_BTC_MIN_EDGE          = 0.07  # min probability divergence to trade
+FIVE_MIN_BTC_RESOLUTION_HIGH   = 0.70  # closing price above this = UP result
+FIVE_MIN_BTC_RESOLUTION_LOW    = 0.30  # closing price below this = DOWN result
+FIVE_MIN_BTC_INTRABAR_LOOKBACK = 4     # bars for intra-market slope
+FIVE_MIN_BTC_SLOPE_MULTIPLIER  = 5.0   # scale intrabar slope to probability drift
+
+# Fixed trade sizes for aggressive / conservative variants (overrides fraction-based sizing)
+FIVE_MIN_BTC_AGGRESSIVE_TRADE_SIZE   = 150.0   # $150 per trade
+FIVE_MIN_BTC_CONSERVATIVE_TRADE_SIZE =  25.0   # $25 per trade
+
 
 # ---------------------------------------------------------------------------
 # Phase flags

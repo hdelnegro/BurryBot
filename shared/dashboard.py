@@ -1238,11 +1238,14 @@ LAUNCH_HTML = """<!DOCTYPE html>
   <form method="POST" action="/api/launch">
     <div class="form-group">
       <label>Strategy</label>
-      <select name="strategy">
+      <select name="strategy" id="strategy-select" onchange="onStrategyChange()">
         <option value="momentum">momentum</option>
         <option value="mean_reversion">mean_reversion</option>
         <option value="rsi">rsi</option>
         <option value="overreaction_fade">overreaction_fade</option>
+        <option value="btc_5min_momentum">btc_5min_momentum</option>
+        <option value="btc_5min_momentum_aggressive">btc_5min_momentum_aggressive</option>
+        <option value="btc_5min_momentum_conservative">btc_5min_momentum_conservative</option>
         <option value="random_baseline">random_baseline</option>
       </select>
     </div>
@@ -1255,7 +1258,7 @@ LAUNCH_HTML = """<!DOCTYPE html>
     </div>
     <div class="form-group">
       <label>Markets</label>
-      <select name="markets">
+      <select name="markets" id="markets-select">
         <option value="5">5</option>
         <option value="10">10</option>
         <option value="20">20</option>
@@ -1282,7 +1285,7 @@ LAUNCH_HTML = """<!DOCTYPE html>
     </div>
     <div class="form-group paper-only" id="group-market-type">
       <label>Market Type</label>
-      <select name="market_type">
+      <select name="market_type" id="market-type-select" onchange="onMarketTypeChange()">
         <option value="standard">standard</option>
         <option value="5min">5min (BTC up/down)</option>
       </select>
@@ -1303,6 +1306,27 @@ function onModeChange() {
   const mode = document.getElementById('mode-select').value;
   document.querySelectorAll('.paper-only').forEach(el => el.classList.toggle('hidden', mode !== 'paper'));
   document.querySelectorAll('.backtest-only').forEach(el => el.classList.toggle('hidden', mode !== 'backtest'));
+}
+function onStrategyChange() {
+  const strategy = document.getElementById('strategy-select').value;
+  const mtSel = document.getElementById('market-type-select');
+  const btc5min = strategy === 'btc_5min_momentum' ||
+                  strategy === 'btc_5min_momentum_aggressive' ||
+                  strategy === 'btc_5min_momentum_conservative';
+  if (btc5min) {
+    mtSel.value = '5min';
+    mtSel.disabled = true;
+  } else {
+    mtSel.disabled = false;
+  }
+  _syncMarketsDisabled();
+}
+function onMarketTypeChange() {
+  _syncMarketsDisabled();
+}
+function _syncMarketsDisabled() {
+  const is5min = document.getElementById('market-type-select').value === '5min';
+  document.getElementById('markets-select').disabled = is5min;
 }
 // Pre-fill end time with +1 hour from now
 (function() {
@@ -1395,7 +1419,12 @@ def api_launch():
     market_type  = request.form.get("market_type", "standard")
     no_fetch     = request.form.get("no_fetch") == "on"
 
-    valid_strategies = {"momentum", "mean_reversion", "rsi", "random_baseline", "overreaction_fade"}
+    # all btc_5min_momentum variants require 5-min market mode — enforce regardless of form value
+    if strategy in ("btc_5min_momentum", "btc_5min_momentum_aggressive", "btc_5min_momentum_conservative"):
+        market_type = "5min"
+
+    valid_strategies = {"momentum", "mean_reversion", "rsi", "random_baseline", "overreaction_fade",
+                        "btc_5min_momentum", "btc_5min_momentum_aggressive", "btc_5min_momentum_conservative"}
     valid_modes      = {"paper", "backtest"}
     valid_markets    = {"5", "10", "20", "30", "50"}
     valid_cash       = {"500", "1000", "2000", "5000"}

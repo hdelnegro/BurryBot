@@ -86,6 +86,11 @@ RSI_PERIOD      = 14    # Number of bars used to compute RSI (standard = 14)
 RSI_OVERSOLD    = 30.0  # RSI below this → price fell too fast → BUY signal
 RSI_OVERBOUGHT  = 70.0  # RSI above this → price rose too fast → SELL signal
 
+# Overreaction Fade strategy
+OVERREACTION_WINDOW    = 20    # bars — rolling window to compute typical bar volatility
+OVERREACTION_THRESHOLD = 2.5   # spike must be ≥2.5× typical move to trigger
+OVERREACTION_MIN_VOL   = 0.003 # skip market if typical bar move < 0.3% (dead flat)
+
 # Minimum price to consider trading (avoids near-zero and near-certain markets)
 # 0.05 = below 5% probability we don't buy; these rarely revert, they go to 0.
 MIN_TRADEABLE_PRICE = 0.05

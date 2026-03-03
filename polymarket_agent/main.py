@@ -53,6 +53,7 @@ from shared.strategies.mean_reversion import MeanReversionStrategy
 from shared.strategies.random_baseline import RandomBaselineStrategy
 from shared.strategies.rsi import RSIStrategy
 from shared.strategies.overreaction_fade import OverreactionFadeStrategy
+from shared.strategies.btc_5min_momentum import BtcFiveMinMomentumStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +64,10 @@ STRATEGY_MAP = {
     "mean_reversion":    MeanReversionStrategy,
     "random_baseline":   RandomBaselineStrategy,
     "rsi":               RSIStrategy,
-    "overreaction_fade": OverreactionFadeStrategy,
+    "overreaction_fade":  OverreactionFadeStrategy,
+    "btc_5min_momentum":              BtcFiveMinMomentumStrategy,
+    "btc_5min_momentum_aggressive":   BtcFiveMinMomentumStrategy,
+    "btc_5min_momentum_conservative": BtcFiveMinMomentumStrategy,
 }
 
 
@@ -92,6 +96,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "  mean_reversion    — Buy when price is abnormally low (Z-score)\n"
             "  rsi               — Buy when RSI < 30 (oversold), sell when RSI > 70 (overbought)\n"
             "  overreaction_fade — Fade news-driven price spikes (return-based)\n"
+            "  btc_5min_momentum             — 5-min BTC streak momentum — for btc-updown-5m markets\n"
+            "  btc_5min_momentum_aggressive  — same signals, $150 fixed bet per trade\n"
+            "  btc_5min_momentum_conservative — same signals, $25 fixed bet per trade\n"
             "  random_baseline   — Random trades (performance floor benchmark)"
         ),
     )
@@ -321,7 +328,10 @@ def interactive_setup() -> argparse.Namespace:
         ("mean_reversion",    "Buy when price drops below Z-score threshold",    "mean_reversion"),
         ("rsi",               "Buy when RSI<30 (oversold), sell when RSI>70",    "rsi"),
         ("overreaction_fade", "Fade news-driven price spikes (return-based)",    "overreaction_fade"),
-        ("random_baseline",   "Random trades — performance floor benchmark",     "random_baseline"),
+        ("btc_5min_momentum",             "5-min BTC streak momentum — for btc-updown-5m markets",  "btc_5min_momentum"),
+        ("btc_5min_momentum_aggressive",  "same signals, $150 fixed bet per trade",                 "btc_5min_momentum_aggressive"),
+        ("btc_5min_momentum_conservative","same signals, $25 fixed bet per trade",                  "btc_5min_momentum_conservative"),
+        ("random_baseline",               "Random trades — performance floor benchmark",             "random_baseline"),
     ])
 
     mode = pick("Mode:", [
@@ -421,6 +431,11 @@ def interactive_setup() -> argparse.Namespace:
         print("Aborted.")
         sys.exit(0)
 
+    market_type = "standard"
+    # all btc_5min_momentum variants only work correctly in 5-min market mode — force it
+    if strategy in ("btc_5min_momentum", "btc_5min_momentum_aggressive", "btc_5min_momentum_conservative"):
+        market_type = "5min"
+
     return argparse.Namespace(
         strategy    = strategy,
         mode        = mode,
@@ -430,7 +445,7 @@ def interactive_setup() -> argparse.Namespace:
         dashboard   = dashboard,
         no_fetch    = no_fetch,
         name        = None,
-        market_type = "standard",
+        market_type = market_type,
     )
 
 
@@ -472,16 +487,42 @@ def main():
             FIVE_MIN_MEAN_REVERSION_WINDOW,
             FIVE_MIN_RSI_PERIOD,
         )
-        strategy.setup(params={
-            "lookback": FIVE_MIN_MOMENTUM_LOOKBACK,
-            "window":   FIVE_MIN_MEAN_REVERSION_WINDOW,
-            "period":   FIVE_MIN_RSI_PERIOD,
-        })
+        if args.strategy in ("btc_5min_momentum", "btc_5min_momentum_aggressive", "btc_5min_momentum_conservative"):
+            from config import (
+                FIVE_MIN_BTC_LOOKBACK, FIVE_MIN_BTC_DECAY, FIVE_MIN_BTC_MIN_EDGE,
+                FIVE_MIN_BTC_RESOLUTION_HIGH, FIVE_MIN_BTC_RESOLUTION_LOW,
+                FIVE_MIN_BTC_INTRABAR_LOOKBACK, FIVE_MIN_BTC_SLOPE_MULTIPLIER,
+            )
+            strategy.setup(params={
+                "lookback":          FIVE_MIN_BTC_LOOKBACK,
+                "decay":             FIVE_MIN_BTC_DECAY,
+                "min_edge":          FIVE_MIN_BTC_MIN_EDGE,
+                "resolution_high":   FIVE_MIN_BTC_RESOLUTION_HIGH,
+                "resolution_low":    FIVE_MIN_BTC_RESOLUTION_LOW,
+                "intrabar_lookback": FIVE_MIN_BTC_INTRABAR_LOOKBACK,
+                "slope_multiplier":  FIVE_MIN_BTC_SLOPE_MULTIPLIER,
+            })
+        else:
+            strategy.setup(params={
+                "lookback": FIVE_MIN_MOMENTUM_LOOKBACK,
+                "window":   FIVE_MIN_MEAN_REVERSION_WINDOW,
+                "period":   FIVE_MIN_RSI_PERIOD,
+            })
     else:
         strategy.setup(params={})
 
     portfolio    = Portfolio(starting_cash=args.cash)
-    risk_manager = RiskManager()
+
+    _FIXED_TRADE_SIZES = {
+        "btc_5min_momentum_aggressive":   None,   # resolved below after config import
+        "btc_5min_momentum_conservative": None,
+    }
+    if args.strategy in _FIXED_TRADE_SIZES:
+        from config import FIVE_MIN_BTC_AGGRESSIVE_TRADE_SIZE, FIVE_MIN_BTC_CONSERVATIVE_TRADE_SIZE
+        _FIXED_TRADE_SIZES["btc_5min_momentum_aggressive"]   = FIVE_MIN_BTC_AGGRESSIVE_TRADE_SIZE
+        _FIXED_TRADE_SIZES["btc_5min_momentum_conservative"] = FIVE_MIN_BTC_CONSERVATIVE_TRADE_SIZE
+
+    risk_manager = RiskManager(fixed_trade_size=_FIXED_TRADE_SIZES.get(args.strategy))
 
     # ----------------------------------------------------------------
     # PAPER TRADING MODE

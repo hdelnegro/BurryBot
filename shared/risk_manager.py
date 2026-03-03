@@ -22,11 +22,15 @@ class RiskManager:
       2. BUY:  Total open exposure after the trade cannot exceed 80%.
       3. SELL: Always allowed.
       4. HOLD: Always allowed.
+
+    fixed_trade_size: when set, each BUY is capped at this fixed dollar amount
+    instead of the default fraction-of-portfolio calculation.
     """
 
-    def __init__(self):
+    def __init__(self, fixed_trade_size: Optional[float] = None):
         self.max_position_fraction = MAX_POSITION_SIZE_FRACTION
         self.max_exposure_fraction = MAX_TOTAL_EXPOSURE_FRACTION
+        self.fixed_trade_size      = fixed_trade_size
 
     def check_signal(
         self,
@@ -51,7 +55,10 @@ class RiskManager:
             if total_value <= 0:
                 return False, 0.0, "BUY blocked: portfolio value is zero or negative"
 
-            max_trade_size = total_value * self.max_position_fraction
+            if self.fixed_trade_size is not None:
+                max_trade_size = self.fixed_trade_size
+            else:
+                max_trade_size = total_value * self.max_position_fraction
 
             existing_pos   = portfolio.get_position(signal.token_id)
             existing_value = 0.0

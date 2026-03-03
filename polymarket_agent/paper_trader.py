@@ -779,6 +779,7 @@ class FiveMinPaperTrader(PaperTrader):
             return  # Same market, no change
 
         # Market changed (or first call): record previous market's closing prices
+        # and force-close any open positions on the outgoing market.
         if not initial and self._current_market:
             for token_id, hist_list, label in [
                 (self._current_market.yes_token_id, self._cross_market_history,    "btc_5min_cross_market"),
@@ -796,6 +797,36 @@ class FiveMinPaperTrader(PaperTrader):
             print(f"  [5min] Market closed. Cross-market history: "
                   f"{len(self._cross_market_history)} Up / "
                   f"{len(self._cross_market_history_no)} Down bars")
+
+            # Force-close any positions on the outgoing market at their last known price.
+            # Must happen before self.markets is replaced, since execute_sell looks up
+            # the market slug from the position object, not from self.markets.
+            now_utc = datetime.utcnow()
+            current_prices = self._get_latest_prices()
+            for token_id in [self._current_market.yes_token_id, self._current_market.no_token_id]:
+                if not token_id:
+                    continue
+                pos = self.portfolio.positions.get(token_id)
+                if pos:
+                    price = current_prices.get(token_id, pos.avg_cost)
+                    sell_signal = Signal(
+                        action     = "SELL",
+                        token_id   = token_id,
+                        outcome    = pos.outcome,
+                        price      = price,
+                        reason     = "Market expired — force-close at resolution",
+                        confidence = 1.0,
+                    )
+                    trade = self.portfolio.execute_sell(
+                        signal=sell_signal,
+                        market_slug=self._current_market.slug,
+                        timestamp=now_utc,
+                    )
+                    if trade:
+                        side = "Up" if token_id == self._current_market.yes_token_id else "Down"
+                        pnl_sign = "+" if trade.pnl >= 0 else ""
+                        print(f"  [5min] Force-closed [{side}] at {price:.4f}: "
+                              f"{pnl_sign}${trade.pnl:.2f} PnL")
 
         market = fetch_current_5min_market()
         if market is None or market.is_resolved:

@@ -1395,7 +1395,7 @@ def api_launch():
     market_type  = request.form.get("market_type", "standard")
     no_fetch     = request.form.get("no_fetch") == "on"
 
-    valid_strategies = {"momentum", "mean_reversion", "rsi", "random_baseline"}
+    valid_strategies = {"momentum", "mean_reversion", "rsi", "random_baseline", "overreaction_fade"}
     valid_modes      = {"paper", "backtest"}
     valid_markets    = {"5", "10", "20", "30", "50"}
     valid_cash       = {"500", "1000", "2000", "5000"}

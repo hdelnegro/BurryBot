@@ -839,6 +839,12 @@ OVERVIEW_HTML = """<!DOCTYPE html>
       font-weight: 700; letter-spacing: 1px; cursor: pointer; border-radius: 2px;
     }
     #launch-btn:hover { background: #ffaa33; }
+    #copy-btn {
+      background: none; color: var(--accent); border: 1px solid var(--accent);
+      padding: 6px 14px; font-size: 11px; font-family: inherit;
+      font-weight: 700; letter-spacing: 1px; cursor: pointer; border-radius: 2px;
+    }
+    #copy-btn:hover { background: rgba(255,140,0,0.12); }
     .btn-delete-all {
       background: none; border: 1px solid #444; color: #888;
       cursor: pointer; font-size: 10px; font-family: inherit;
@@ -861,6 +867,7 @@ OVERVIEW_HTML = """<!DOCTYPE html>
       <option value="created">Sort: Created</option>
       <option value="name">Sort: Name</option>
     </select>
+    <button id="copy-btn" onclick="location.href='/launch/copy'">&#8645; COPY TRADE</button>
     <button id="launch-btn" onclick="location.href='/launch'">+ LAUNCH AGENT</button>
   </div>
 </header>
@@ -1187,6 +1194,171 @@ pollInstances();
 
 
 # ---------------------------------------------------------------------------
+# Launch Copy Trading page HTML
+# ---------------------------------------------------------------------------
+
+LAUNCH_COPY_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>BurryBot — Launch Copy Trading</title>
+  <style>
+    :root {
+      --bg: #000000; --surface: #111111; --border: #1e1e1e;
+      --text: #ffffff; --muted: #707070; --accent: #ff8c00;
+      --red: #ff433d;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; }
+    header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 14px 24px; display: flex; align-items: center; gap: 16px;
+    }
+    header h1 { font-size: 16px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; }
+    .back-link { color: var(--muted); text-decoration: none; font-size: 12px; }
+    .back-link:hover { color: var(--accent); }
+    main { padding: 32px 24px; max-width: 540px; }
+    .info-banner {
+      background: rgba(255,140,0,.08); border: 1px solid rgba(255,140,0,.3);
+      color: var(--accent); padding: 8px 14px; margin-bottom: 20px;
+      border-radius: 2px; font-size: 12px; line-height: 1.6;
+    }
+    .error-banner {
+      background: rgba(255,67,61,.12); border: 1px solid rgba(255,67,61,.4);
+      color: var(--red); padding: 8px 14px; margin-bottom: 20px; border-radius: 2px; font-size: 12px;
+    }
+    .form-group { margin-bottom: 18px; }
+    label { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase;
+            letter-spacing: .8px; margin-bottom: 6px; }
+    input[type="text"], input[type="number"], input[type="datetime-local"] {
+      width: 100%; background: var(--surface); color: var(--text);
+      border: 1px solid var(--border); padding: 8px 10px;
+      font-size: 13px; font-family: inherit; border-radius: 2px;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    .hint { font-size: 10px; color: var(--muted); margin-top: 4px; }
+    .btn-submit {
+      width: 100%; background: var(--accent); color: #000; border: none;
+      padding: 10px; font-size: 13px; font-family: inherit;
+      font-weight: 700; letter-spacing: 1px; cursor: pointer; border-radius: 2px; margin-top: 8px;
+    }
+    .btn-submit:hover { background: #ffaa33; }
+    .cancel-link { display: block; text-align: center; margin-top: 14px;
+                   color: var(--muted); text-decoration: none; font-size: 12px; }
+    .cancel-link:hover { color: var(--text); }
+    .mode-toggle { display: flex; gap: 0; margin-bottom: 0; }
+    .mode-toggle input[type="radio"] { display: none; }
+    .mode-toggle label {
+      flex: 1; text-align: center; padding: 8px; cursor: pointer;
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 1px;
+      text-transform: uppercase; transition: all .15s;
+    }
+    .mode-toggle label:first-of-type { border-radius: 2px 0 0 2px; }
+    .mode-toggle label:last-of-type  { border-radius: 0 2px 2px 0; border-left: none; }
+    .mode-toggle input:checked + label { background: var(--accent); color: #000; border-color: var(--accent); }
+    #live-warning {
+      display: none; background: rgba(255,67,61,.12); border: 1px solid rgba(255,67,61,.4);
+      color: var(--red); padding: 8px 14px; margin-top: 10px;
+      border-radius: 2px; font-size: 12px; line-height: 1.5;
+    }
+    #trade-size-group { transition: opacity .15s; }
+  </style>
+</head>
+<body>
+<header>
+  <a class="back-link" href="/">&#8592; Overview</a>
+  <h1>&#9889; BurryBot &#8212; Copy Trading</h1>
+</header>
+<main>
+  __ERROR_BANNER__
+  <div class="info-banner">
+    Mirror another wallet's trades in real time using a fixed USDC size per position.
+  </div>
+  <form method="POST" action="/api/launch/copy">
+    <div class="form-group">
+      <label>Trading Mode</label>
+      <div class="mode-toggle">
+        <input type="radio" name="copy_trading_mode" id="mode-paper" value="paper" checked/>
+        <label for="mode-paper">Paper</label>
+        <input type="radio" name="copy_trading_mode" id="mode-live" value="live"/>
+        <label for="mode-live">Live</label>
+      </div>
+      <div id="live-warning">
+        &#9888; LIVE MODE — real orders will be placed on Polymarket.<br/>
+        Wallet credentials must be configured in <code>polymarket_agent/.env</code>.
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Wallet Address to Copy</label>
+      <input type="text" name="copy_address" placeholder="0x..." maxlength="42" required/>
+      <div class="hint">Polymarket proxy wallet address (0x + 40 hex chars)</div>
+    </div>
+    <div class="form-group">
+      <label>Sizing Mode</label>
+      <div class="mode-toggle">
+        <input type="radio" name="copy_sizing" id="sizing-fixed" value="fixed" checked/>
+        <label for="sizing-fixed">Fixed</label>
+        <input type="radio" name="copy_sizing" id="sizing-rm" value="risk_manager"/>
+        <label for="sizing-rm">Risk Manager</label>
+      </div>
+      <div class="hint" id="sizing-hint">Fixed USDC per trade &mdash; set the amount below</div>
+    </div>
+    <div class="form-group" id="trade-size-group">
+      <label>Trade Size per Copy (USDC)</label>
+      <input type="number" name="copy_size" value="10" min="1" max="10000" step="1"/>
+      <div class="hint">Fixed USDC spent on every mirrored buy</div>
+    </div>
+    <div class="form-group">
+      <label>Starting Cash (USDC)</label>
+      <input type="number" name="cash" value="1000" min="100" max="100000" step="100"/>
+      <div class="hint">Virtual cash for paper mode; ignored in live mode (uses wallet balance)</div>
+    </div>
+    <div class="form-group">
+      <label>Session End Time</label>
+      <input type="datetime-local" name="end_time" id="end-time-input"/>
+      <div class="hint">Local time — session auto-closes at this time</div>
+    </div>
+    <div class="form-group">
+      <label>Instance Name (optional)</label>
+      <input type="text" name="name" placeholder="auto-generated" maxlength="40"/>
+      <div class="hint">Letters, digits, underscores, hyphens only</div>
+    </div>
+    <button type="submit" class="btn-submit">&#8645; LAUNCH COPY TRADING</button>
+  </form>
+  <a class="cancel-link" href="/">CANCEL</a>
+</main>
+<script>
+(function() {
+  const inp = document.getElementById('end-time-input');
+  if (inp) {
+    const d = new Date(Date.now() + 6 * 3600000);
+    const pad = n => String(n).padStart(2, '0');
+    inp.value = d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
+                'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+  document.querySelectorAll('input[name="copy_trading_mode"]').forEach(r => {
+    r.addEventListener('change', () => {
+      document.getElementById('live-warning').style.display =
+        r.value === 'live' && r.checked ? 'block' : 'none';
+    });
+  });
+  document.querySelectorAll('input[name="copy_sizing"]').forEach(r => {
+    r.addEventListener('change', () => {
+      const isFixed = document.getElementById('sizing-fixed').checked;
+      document.getElementById('trade-size-group').style.display = isFixed ? '' : 'none';
+      document.getElementById('sizing-hint').textContent = isFixed
+        ? 'Fixed USDC per trade \u2014 set the amount below'
+        : 'Sizes each trade as a fraction of your portfolio (same as all other strategies)';
+    });
+  });
+})();
+</script>
+</body>
+</html>
+"""
+
 # Launch Agent page HTML
 # ---------------------------------------------------------------------------
 
@@ -1420,6 +1592,86 @@ def launch_page():
     return _no_cache(resp)
 
 
+@app.route("/launch/copy")
+def launch_copy_page():
+    """Launch Copy Trading form page."""
+    error = request.args.get("error", "")
+    if error == "address":
+        banner = '<div class="error-banner">Wallet address must start with 0x and be 42 characters.</div>'
+    elif error == "past":
+        banner = '<div class="error-banner">End time must be in the future.</div>'
+    elif error == "invalid":
+        banner = '<div class="error-banner">Invalid parameters — check values and try again.</div>'
+    else:
+        banner = ""
+    html = LAUNCH_COPY_HTML.replace("__ERROR_BANNER__", banner)
+    resp = Response(html, mimetype="text/html")
+    return _no_cache(resp)
+
+
+@app.route("/api/launch/copy", methods=["POST"])
+def api_launch_copy():
+    """Validate copy-trading form and spawn a detached agent subprocess."""
+    copy_address   = request.form.get("copy_address", "").strip()
+    copy_size      = request.form.get("copy_size", "10").strip()
+    cash           = request.form.get("cash", "1000").strip()
+    end_time_str   = request.form.get("end_time", "")
+    name           = re.sub(r"[^a-zA-Z0-9_-]", "", request.form.get("name", ""))[:40]
+    trading_mode   = request.form.get("copy_trading_mode", "paper")
+    if trading_mode not in ("paper", "live"):
+        trading_mode = "paper"
+    sizing_mode    = request.form.get("copy_sizing", "fixed")
+    if sizing_mode not in ("fixed", "risk_manager"):
+        sizing_mode = "fixed"
+
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", copy_address):
+        return redirect("/launch/copy?error=address")
+
+    try:
+        copy_size_f = float(copy_size)
+        if not (0 < copy_size_f <= 10000):
+            raise ValueError
+    except (ValueError, TypeError):
+        return redirect("/launch/copy?error=invalid")
+
+    try:
+        cash_f = float(cash)
+        if not (100 <= cash_f <= 100000):
+            raise ValueError
+    except (ValueError, TypeError):
+        return redirect("/launch/copy?error=invalid")
+
+    try:
+        end_dt = datetime.strptime(end_time_str, "%Y-%m-%dT%H:%M")
+        duration_minutes = int((end_dt - datetime.now()).total_seconds() / 60)
+        if duration_minutes <= 0:
+            return redirect("/launch/copy?error=past")
+    except (ValueError, TypeError):
+        return redirect("/launch/copy?error=invalid")
+
+    cmd = [
+        _PYTHON_PATH, "main.py",
+        "--mode", "copy",
+        "--copy-address", copy_address,
+        "--copy-size", str(copy_size_f),
+        "--cash", str(cash_f),
+        "--duration", str(duration_minutes),
+        "--copy-trading-mode", trading_mode,
+        "--copy-sizing", sizing_mode,
+    ]
+    if name:
+        cmd += ["--name", name]
+
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    ts = int(time.time())
+    log_path = os.path.join(_LOG_DIR, f"launch_copy_{copy_address[2:10].lower()}_{ts}.log")
+    with open(log_path, "w") as lf:
+        subprocess.Popen(cmd, cwd=_AGENT_DIR, stdout=lf, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+
+    return redirect("/")
+
+
 @app.route("/api/launch", methods=["POST"])
 def api_launch():
     """Validate form and spawn a detached agent subprocess."""
@@ -1524,7 +1776,16 @@ def start_in_thread(host: str = "0.0.0.0", port: int = 5000) -> None:
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     time.sleep(0.3)
-    print(f"\nDashboard running at → http://{host}:{port}")
+    # Resolve the real IP when binding to all interfaces
+    display_host = host
+    if host in ("0.0.0.0", ""):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
+                _s.connect(("8.8.8.8", 80))
+                display_host = _s.getsockname()[0]
+        except Exception:
+            display_host = "localhost"
+    print(f"\nDashboard running at → http://{display_host}:{port}")
     print("Open that URL in your browser. It refreshes every second.\n")
 
 

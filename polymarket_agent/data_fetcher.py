@@ -252,6 +252,55 @@ def fetch_current_5min_market() -> Optional[Market]:
 
 
 # ---------------------------------------------------------------------------
+# Copy Trading — user activity and live price helpers
+# ---------------------------------------------------------------------------
+
+def fetch_user_activity(address: str, limit: int = 50) -> list:
+    """
+    Fetch recent trade activity for a Polymarket wallet from the Data API.
+
+    Returns a list of trade dicts (most recent first), each containing:
+      transactionHash, asset (token_id), side (BUY/SELL), price,
+      size, usdcSize, slug, outcome, title, conditionId, timestamp.
+
+    Only records with type == "TRADE" are returned.
+    """
+    from config import DATA_API_HOST
+    try:
+        resp = requests.get(
+            f"{DATA_API_HOST}/activity",
+            params={"user": address, "limit": limit},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return [t for t in data if t.get("type") == "TRADE"]
+    except Exception as e:
+        print(f"  [copy] fetch_user_activity error: {e}")
+        return []
+
+
+def fetch_token_midprice(token_id: str) -> Optional[float]:
+    """
+    Fetch the current midpoint price for a token from the CLOB API.
+
+    Returns a float in [0, 1], or None if the price can't be fetched.
+    """
+    from config import CLOB_HOST
+    try:
+        resp = requests.get(
+            f"{CLOB_HOST}/midpoint",
+            params={"token_id": token_id},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        mid = resp.json().get("mid")
+        return float(mid) if mid is not None else None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Stub for Phase 2: order book depth (not used in backtesting)
 # ---------------------------------------------------------------------------
 

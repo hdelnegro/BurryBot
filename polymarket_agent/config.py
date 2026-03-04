@@ -203,4 +203,17 @@ LIVE_ORDER_TYPE = "GTC"
 LIVE_SLIPPAGE_TOLERANCE = 0.02
 
 # Minimum order size in USDC — orders smaller than this are skipped
-LIVE_MIN_ORDER_SIZE_USDC = 1.0
+LIVE_MIN_ORDER_SIZE_USDC = 5.0
+
+# ---------------------------------------------------------------------------
+# Copy Trading (Phase 4)
+# ---------------------------------------------------------------------------
+
+# Polymarket Data API (public, no auth required)
+DATA_API_HOST = "https://data-api.polymarket.com"
+
+# How often to poll the target wallet's activity feed (seconds)
+COPY_POLL_INTERVAL_SECONDS = 30
+
+# How many recent activity records to fetch per poll
+COPY_ACTIVITY_LIMIT = 50

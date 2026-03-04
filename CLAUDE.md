@@ -9,26 +9,28 @@ BurryBot/
 ├── shared/                  # Platform-agnostic core library + dashboard
 │   ├── models.py            # Dataclasses: Market, PriceBar, Signal, Position, Trade
 │   ├── strategy_base.py     # Abstract base class all strategies inherit
-│   ├── strategies/          # momentum, mean_reversion, rsi, random_baseline
+│   ├── strategies/          # momentum, mean_reversion, rsi, random_baseline, overreaction_fade, btc_5min_momentum
 │   ├── portfolio.py         # Cash/position tracking; execute buys/sells
 │   ├── risk_manager.py      # Position size and exposure limits
 │   ├── metrics.py           # Sharpe, drawdown, win rate, etc.
 │   ├── backtest_engine.py   # Bar-by-bar simulation loop
-│   ├── dashboard.py         # Flask dashboard; discovers all *_agent/data/ dirs
+│   ├── dashboard.py         # Flask dashboard; discovers all *_agent/data/ dirs; launch forms
 │   ├── requirements.txt     # flask only
 │   └── venv/                # Minimal venv for running dashboard standalone
 │
 ├── polymarket_agent/        # Polymarket platform-specific code
 │   ├── venv/                # Full venv (requests, pandas, numpy, flask, py-clob-client, etc.)
 │   ├── data/                # CSV cache + state_*.json files
+│   ├── logs/                # Subprocess logs from dashboard-launched sessions
 │   ├── config.py            # Polymarket API URLs + constants (incl. live trading settings)
-│   ├── data_fetcher.py      # Gamma API (market list) + CLOB API (prices)
+│   ├── data_fetcher.py      # Gamma API (market list) + CLOB API (prices) + Data API (user activity)
 │   ├── data_storage.py      # CSV cache read/write
-│   ├── paper_trader.py      # Live polling loop; writes state_<name>.json; base for LiveTrader
+│   ├── paper_trader.py      # Live polling loop; writes state_<name>.json; base for LiveTrader/CopyTrader
 │   ├── live_trader.py       # Phase 3: real CLOB orders; inherits PaperTrader
+│   ├── copy_trader.py       # Phase 4: mirrors another wallet's trades; inherits PaperTrader
 │   ├── wallet.py            # WalletAdapter ABC + MagicLinkWallet; wallet_from_env() factory
 │   ├── .env.example         # Credential template (copy to .env; .env is gitignored)
-│   ├── main.py              # Entry point (backtest + paper + live modes)
+│   ├── main.py              # Entry point (backtest + paper + live + copy modes)
 │   └── status.py            # CLI snapshot; no venv needed
 │
 └── kalshi_agent/            # Kalshi platform-specific code
@@ -56,11 +58,11 @@ python main.py --strategy random_baseline --no-fetch   # use cached data only
 python main.py --strategy momentum --mode paper --duration 60
 python main.py --strategy mean_reversion --mode paper --markets 10 --duration 120
 
-# Paper trading with a custom instance name (defaults to <strategy>_<HHMM>)
+# Paper trading with a custom instance name (defaults to <strategy>_<HHMMSS>)
 python main.py --strategy momentum --mode paper --duration 60 --name run1
 python main.py --strategy rsi --mode paper --duration 120 --name run2
 
-# Paper trading with live web dashboard (http://localhost:5000)
+# Paper trading with live web dashboard (shows real machine IP)
 python main.py --strategy momentum --mode paper --duration 60 --dashboard
 
 # 5-minute BTC up/down markets (30-second poll, much faster trading)
@@ -72,6 +74,13 @@ python main.py --strategy rsi --mode paper --market-type 5min --duration 30 --na
 # A confirmation prompt (must type YES) appears before any orders are placed
 python main.py --strategy momentum --mode live --markets 3 --duration 60
 python main.py --strategy momentum --mode live --markets 3 --duration 60 --dashboard
+
+# Copy trading mode (Phase 4) — mirror another wallet's trades
+# Paper copy (simulated money):
+python main.py --mode copy --copy-address 0x... --copy-size 10 --duration 360
+python main.py --mode copy --copy-address 0x... --copy-sizing risk_manager --duration 360
+# Live copy (REAL money — requires .env credentials):
+python main.py --mode copy --copy-address 0x... --copy-sizing risk_manager --copy-trading-mode live --duration 360
 
 # Check status of a running paper trading session (no venv needed)
 python status.py
@@ -104,13 +113,13 @@ python main.py --strategy momentum --mode paper --duration 60 --dashboard
 cd BurryBot
 source shared/venv/bin/activate
 python shared/dashboard.py
-# → http://localhost:5000 shows cards for ALL running/recent instances
-#   with platform badges (polymarket / kalshi)
+# → Prints real machine IP, e.g. http://192.168.1.42:5000
+#   Shows cards for ALL running/recent instances with platform badges
 
 # Or via --dashboard flag from any agent's main.py (see above)
 ```
 
-Available strategies: `momentum`, `mean_reversion`, `rsi`, `random_baseline`
+Available strategies: `momentum`, `mean_reversion`, `rsi`, `overreaction_fade`, `random_baseline`, `btc_5min_momentum`, `btc_5min_momentum_aggressive`, `btc_5min_momentum_conservative`
 
 ## Architecture Overview
 
@@ -126,12 +135,15 @@ BurryBot is a multi-platform prediction-market trading system. Platform-agnostic
 
 **Live trading mode** (Polymarket only): Identical to paper trading but `LiveTrader` overrides `_run_tick()` to place real GTC limit orders via `py-clob-client`. Portfolio cash is seeded from the on-chain USDC balance. `wallet.py` handles authentication (Magic Link by default). All `py_clob_client` imports are lazy — they only trigger when `--mode live` is active.
 
+**Copy trading mode** (Polymarket only): Polls `data-api.polymarket.com/activity` every 30 seconds for a target wallet's new trades and mirrors them. Seeds historical trades on startup (skips them). Supports paper and live execution. Two sizing modes: `fixed` (constant USDC per trade) or `risk_manager` (fraction-based, same as all other strategies). `CopyTrader` inherits `PaperTrader` and uses `_extra_state_fields()` to inject copy-specific state into the dashboard JSON.
+
 ### Data Flow
 
 ```
 Platform APIs → data_fetcher.py → data_storage.py (CSV cache in data/)
                                         ↓
 main.py → BacktestEngine / PaperTrader / LiveTrader → strategy.generate_signal()
+       └→ CopyTrader → data_fetcher.fetch_user_activity() → mirror signal
                                         ↓
                             shared/risk_manager.check_signal()
                                         ↓
@@ -151,17 +163,18 @@ main.py → BacktestEngine / PaperTrader / LiveTrader → strategy.generate_sign
 |------|------|
 | `shared/models.py` | Dataclasses: `Market` (+ `platform` field), `PriceBar`, `Signal`, `Position`, `Trade` |
 | `shared/strategy_base.py` | Abstract base class all strategies must inherit |
-| `shared/strategies/` | `momentum.py`, `mean_reversion.py`, `rsi.py`, `random_baseline.py` |
+| `shared/strategies/` | `momentum.py`, `mean_reversion.py`, `rsi.py`, `overreaction_fade.py`, `btc_5min_momentum.py`, `random_baseline.py` |
 | `shared/backtest_engine.py` | Bar-by-bar simulation loop; prevents lookahead bias |
 | `shared/portfolio.py` | Tracks cash, positions, trade log; executes buys/sells |
 | `shared/risk_manager.py` | Gates every signal; enforces position size and exposure limits |
 | `shared/metrics.py` | Computes final performance stats (total return, Sharpe, win rate, etc.) |
-| `shared/dashboard.py` | Flask web dashboard; globs all `*_agent/data/state_*.json`; platform badges |
+| `shared/dashboard.py` | Flask web dashboard; globs all `*_agent/data/state_*.json`; `/launch` and `/launch/copy` forms; platform badges |
 | `*/config.py` | Platform-specific constants — API URLs, thresholds, defaults |
 | `*/data_fetcher.py` | Platform API calls (market list, price history, latest price) |
 | `*/data_storage.py` | Saves/loads markets and price history as CSV files |
-| `*/paper_trader.py` | Live polling loop; writes `data/state_<name>.json` with `platform` field |
+| `*/paper_trader.py` | Live polling loop; writes `data/state_<name>.json` with `platform` field; `_extra_state_fields()` hook for subclasses |
 | `polymarket_agent/live_trader.py` | Phase 3: `LiveTrader(PaperTrader)` — overrides `_run_tick()` and `run()` for real CLOB orders |
+| `polymarket_agent/copy_trader.py` | Phase 4: `CopyTrader(PaperTrader)` — polls target wallet activity, mirrors trades; supports fixed/risk_manager sizing and paper/live execution |
 | `polymarket_agent/wallet.py` | `WalletAdapter` ABC + `MagicLinkWallet`; `wallet_from_env()` reads `.env`; lazy `py_clob_client` import |
 | `*/main.py` | Platform entry point; sets up sys.path for both agent dir and shared/ |
 | `polymarket_agent/status.py` | CLI snapshot; reads most recent `data/state_*.json`; no venv needed |
@@ -175,11 +188,25 @@ The paper trader refreshes its market watchlist every `MARKET_REFRESH_INTERVAL_T
 
 ### Dashboard / State File
 
-Each agent's `paper_trader._write_state()` writes `data/state_<name>.json` atomically after every tick. The state includes `"platform": "polymarket"` or `"platform": "kalshi"`.
+Each agent's `paper_trader._write_state()` writes `data/state_<name>.json` atomically after every tick. NaN/Inf floats are sanitized to `null` before writing. The state includes `"platform": "polymarket"` or `"platform": "kalshi"`. Subclasses can inject extra fields via `_extra_state_fields()`.
 
-`shared/dashboard.py` serves two views:
-- **Overview** (`/`) — polls `/api/instances` every 2 seconds; shows all `state_*.json` files across **all** agent directories as clickable cards with platform badges and sparklines
+`shared/dashboard.py` serves:
+- **Overview** (`/`) — polls `/api/instances` every 2 seconds; shows all `state_*.json` files across **all** agent directories as clickable cards with platform badges and sparklines; "COPY TRADE" and "LAUNCH AGENT" buttons in the header
 - **Detail** (`/instance/<name>`) — polls `/api/state/<name>` every second; full single-instance view with equity curve, signals, positions, and trades
+- **Launch Agent** (`/launch`) — form to start a paper/backtest session; spawns subprocess via `/api/launch`
+- **Launch Copy Trading** (`/launch/copy`) — form to start a copy trading session (paper or live, fixed or risk_manager sizing); spawns subprocess via `/api/launch/copy`
+
+The dashboard binds to `0.0.0.0` and prints the real machine IP on startup, making it accessible from other devices on the network.
+
+### Copy Trading Details
+
+- **Target activity**: `GET data-api.polymarket.com/activity?user=ADDRESS&limit=N` — public, no auth required; returns trades with `transactionHash`, `asset` (token_id), `side`, `price`, `usdcSize`, `slug`, `outcome`
+- **Deduplication**: `_seen_tx` set tracks processed `transactionHash` values; historical trades are seeded on startup and skipped
+- **Sizing modes**:
+  - `fixed`: constant `copy_size_usdc` per BUY (e.g. $10 per trade)
+  - `risk_manager`: calls `risk_manager.check_signal()` — sizes each trade as a fraction of portfolio (same as all other strategies; `MAX_POSITION_SIZE_FRACTION = 5%`)
+- **Live minimum**: `LIVE_MIN_ORDER_SIZE_USDC = 5.0` — orders below $5 are skipped in live mode
+- **Poll interval**: `COPY_POLL_INTERVAL_SECONDS = 30`
 
 ### Kalshi API Notes
 
@@ -232,3 +259,4 @@ No POL (gas) required — Magic Link (`POLY_WALLET_TYPE=magic`) uses a gasless r
 Each agent's `config.py` has phase flags:
 - `PAPER_TRADING_ENABLED = True` (Phase 2 — complete)
 - `LIVE_TRADING_ENABLED = True` (Phase 3 — complete for Polymarket; Kalshi requires RSA-PSS key signing)
+- Copy trading (Phase 4 — complete for Polymarket; paper + live; launchable from dashboard)

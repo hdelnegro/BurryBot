@@ -43,6 +43,7 @@ from shared.portfolio import Portfolio
 from shared.risk_manager import RiskManager
 from shared.backtest_engine import BacktestEngine
 from paper_trader import PaperTrader, FiveMinPaperTrader
+from copy_trader import CopyTrader
 # LiveTrader and wallet_from_env are imported lazily inside the live-mode block
 # to avoid importing py_clob_client (and its dependency chain) when not needed.
 from shared import metrics as metrics_module
@@ -88,7 +89,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strategy",
         type=str,
-        required=True,
+        default=None,
         choices=list(STRATEGY_MAP.keys()),
         help=(
             "Which strategy to run:\n"
@@ -107,13 +108,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--mode",
         type=str,
         default="backtest",
-        choices=["backtest", "paper", "live"],
+        choices=["backtest", "paper", "live", "copy"],
         help=(
             "Execution mode (default: backtest):\n"
             "  backtest — simulate strategy on historical data\n"
             "  paper    — run live with real prices, simulated money\n"
-            "  live     — run live with real prices, REAL money (Phase 3)"
+            "  live     — run live with real prices, REAL money (Phase 3)\n"
+            "  copy     — mirror another wallet's trades (Phase 4)"
         ),
+    )
+
+    parser.add_argument(
+        "--copy-address",
+        type=str,
+        default=None,
+        dest="copy_address",
+        help="[copy mode] Polymarket wallet address to mirror (0x...)",
+    )
+
+    parser.add_argument(
+        "--copy-size",
+        type=float,
+        default=10.0,
+        dest="copy_size",
+        help="[copy mode] Fixed USDC amount per copied trade (default: 10.0)",
+    )
+
+    parser.add_argument(
+        "--copy-trading-mode",
+        type=str,
+        default="paper",
+        choices=["paper", "live"],
+        dest="copy_trading_mode",
+        help="[copy mode] Whether to place real orders (live) or simulate (paper, default)",
+    )
+
+    parser.add_argument(
+        "--copy-sizing",
+        type=str,
+        default="fixed",
+        choices=["fixed", "risk_manager"],
+        dest="copy_sizing",
+        help="[copy mode] fixed = fixed USDC per trade; risk_manager = fraction-based sizing (default: fixed)",
     )
 
     parser.add_argument(
@@ -150,7 +186,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dashboard",
         action="store_true",
-        help="[paper mode only] Start a live web dashboard at http://localhost:5000",
+        help="[paper mode only] Start a live web dashboard (auto-detects URL)",
     )
 
     parser.add_argument(
@@ -380,7 +416,7 @@ def interactive_setup() -> argparse.Namespace:
                     pass
             print("  Invalid — use exactly 12 digits: YYYYMMDDhhmm")
 
-        dashboard = pick("Live dashboard at http://localhost:5000?", [
+        dashboard = pick("Start live web dashboard?", [
             ("Yes", "open in your browser for live charts and metrics", True),
             ("No",  "console output only",                              False),
         ])
@@ -460,69 +496,91 @@ def main():
         parser = build_arg_parser()
         args   = parser.parse_args()
 
-    mode_label = {"paper": "Paper Trading", "live": "Live Trading"}.get(args.mode, "Backtesting")
+    # Validate: copy mode needs --copy-address; all other modes need --strategy
+    if args.mode == "copy":
+        if not args.copy_address:
+            print("ERROR: --copy-address is required for copy mode.")
+            print("  Example: python main.py --mode copy --copy-address 0x...")
+            sys.exit(1)
+    elif args.strategy is None:
+        print("ERROR: --strategy is required for backtest/paper/live modes.")
+        print("  Example: python main.py --strategy momentum --mode paper")
+        sys.exit(1)
+
+    mode_label = {
+        "paper": "Paper Trading", "live": "Live Trading", "copy": "Copy Trading",
+    }.get(args.mode, "Backtesting")
     market_type = getattr(args, "market_type", "standard")
 
     print()
     print("=" * 55)
     print(f"  Polymarket Agent — {mode_label}")
-    print(f"  Strategy : {args.strategy}")
+    if args.mode == "copy":
+        print(f"  Copying  : {args.copy_address}")
+        print(f"  Trade sz : ${args.copy_size:.2f} USDC per trade")
+    else:
+        print(f"  Strategy : {args.strategy}")
     if args.mode == "paper":
         print(f"  Market type: {market_type}")
     print(f"  Markets  : {args.markets}")
     print(f"  Cash     : ${args.cash:.2f}")
-    if args.mode == "paper":
+    if args.mode in ("paper", "copy"):
         print(f"  Duration : {args.duration} minutes")
     if args.mode == "live":
         print(f"  *** REAL MONEY — orders will be placed on Polymarket ***")
     print("=" * 55)
 
-    strategy_class = STRATEGY_MAP[args.strategy]
-    strategy       = strategy_class()
+    if args.mode != "copy":
+        strategy_class = STRATEGY_MAP[args.strategy]
+        strategy       = strategy_class()
+    else:
+        strategy = None
 
     # Apply strategy params — use tuned 5-min values when in 5min market mode
-    if market_type == "5min":
-        from config import (
-            FIVE_MIN_MOMENTUM_LOOKBACK,
-            FIVE_MIN_MEAN_REVERSION_WINDOW,
-            FIVE_MIN_RSI_PERIOD,
-        )
-        if args.strategy in ("btc_5min_momentum", "btc_5min_momentum_aggressive", "btc_5min_momentum_conservative"):
+    # (copy mode has no strategy object — skip this block entirely)
+    if args.mode != "copy":
+        if market_type == "5min":
             from config import (
-                FIVE_MIN_BTC_LOOKBACK, FIVE_MIN_BTC_DECAY, FIVE_MIN_BTC_MIN_EDGE,
-                FIVE_MIN_BTC_RESOLUTION_HIGH, FIVE_MIN_BTC_RESOLUTION_LOW,
-                FIVE_MIN_BTC_INTRABAR_LOOKBACK, FIVE_MIN_BTC_SLOPE_MULTIPLIER,
+                FIVE_MIN_MOMENTUM_LOOKBACK,
+                FIVE_MIN_MEAN_REVERSION_WINDOW,
+                FIVE_MIN_RSI_PERIOD,
             )
-            strategy.setup(params={
-                "lookback":          FIVE_MIN_BTC_LOOKBACK,
-                "decay":             FIVE_MIN_BTC_DECAY,
-                "min_edge":          FIVE_MIN_BTC_MIN_EDGE,
-                "resolution_high":   FIVE_MIN_BTC_RESOLUTION_HIGH,
-                "resolution_low":    FIVE_MIN_BTC_RESOLUTION_LOW,
-                "intrabar_lookback": FIVE_MIN_BTC_INTRABAR_LOOKBACK,
-                "slope_multiplier":  FIVE_MIN_BTC_SLOPE_MULTIPLIER,
-            })
+            if args.strategy in ("btc_5min_momentum", "btc_5min_momentum_aggressive", "btc_5min_momentum_conservative"):
+                from config import (
+                    FIVE_MIN_BTC_LOOKBACK, FIVE_MIN_BTC_DECAY, FIVE_MIN_BTC_MIN_EDGE,
+                    FIVE_MIN_BTC_RESOLUTION_HIGH, FIVE_MIN_BTC_RESOLUTION_LOW,
+                    FIVE_MIN_BTC_INTRABAR_LOOKBACK, FIVE_MIN_BTC_SLOPE_MULTIPLIER,
+                )
+                strategy.setup(params={
+                    "lookback":          FIVE_MIN_BTC_LOOKBACK,
+                    "decay":             FIVE_MIN_BTC_DECAY,
+                    "min_edge":          FIVE_MIN_BTC_MIN_EDGE,
+                    "resolution_high":   FIVE_MIN_BTC_RESOLUTION_HIGH,
+                    "resolution_low":    FIVE_MIN_BTC_RESOLUTION_LOW,
+                    "intrabar_lookback": FIVE_MIN_BTC_INTRABAR_LOOKBACK,
+                    "slope_multiplier":  FIVE_MIN_BTC_SLOPE_MULTIPLIER,
+                })
+            else:
+                strategy.setup(params={
+                    "lookback": FIVE_MIN_MOMENTUM_LOOKBACK,
+                    "window":   FIVE_MIN_MEAN_REVERSION_WINDOW,
+                    "period":   FIVE_MIN_RSI_PERIOD,
+                })
         else:
-            strategy.setup(params={
-                "lookback": FIVE_MIN_MOMENTUM_LOOKBACK,
-                "window":   FIVE_MIN_MEAN_REVERSION_WINDOW,
-                "period":   FIVE_MIN_RSI_PERIOD,
-            })
-    else:
-        strategy.setup(params={})
+            strategy.setup(params={})
 
-    portfolio    = Portfolio(starting_cash=args.cash)
+        portfolio    = Portfolio(starting_cash=args.cash)
 
-    _FIXED_TRADE_SIZES = {
-        "btc_5min_momentum_aggressive":   None,   # resolved below after config import
-        "btc_5min_momentum_conservative": None,
-    }
-    if args.strategy in _FIXED_TRADE_SIZES:
-        from config import FIVE_MIN_BTC_AGGRESSIVE_TRADE_SIZE, FIVE_MIN_BTC_CONSERVATIVE_TRADE_SIZE
-        _FIXED_TRADE_SIZES["btc_5min_momentum_aggressive"]   = FIVE_MIN_BTC_AGGRESSIVE_TRADE_SIZE
-        _FIXED_TRADE_SIZES["btc_5min_momentum_conservative"] = FIVE_MIN_BTC_CONSERVATIVE_TRADE_SIZE
+        _FIXED_TRADE_SIZES = {
+            "btc_5min_momentum_aggressive":   None,   # resolved below after config import
+            "btc_5min_momentum_conservative": None,
+        }
+        if args.strategy in _FIXED_TRADE_SIZES:
+            from config import FIVE_MIN_BTC_AGGRESSIVE_TRADE_SIZE, FIVE_MIN_BTC_CONSERVATIVE_TRADE_SIZE
+            _FIXED_TRADE_SIZES["btc_5min_momentum_aggressive"]   = FIVE_MIN_BTC_AGGRESSIVE_TRADE_SIZE
+            _FIXED_TRADE_SIZES["btc_5min_momentum_conservative"] = FIVE_MIN_BTC_CONSERVATIVE_TRADE_SIZE
 
-    risk_manager = RiskManager(fixed_trade_size=_FIXED_TRADE_SIZES.get(args.strategy))
+        risk_manager = RiskManager(fixed_trade_size=_FIXED_TRADE_SIZES.get(args.strategy))
 
     # ----------------------------------------------------------------
     # PAPER TRADING MODE
@@ -537,9 +595,9 @@ def main():
         if args.dashboard:
             try:
                 from shared.dashboard import start_in_thread as start_dashboard
-                start_dashboard(host="127.0.0.1", port=5000)
+                start_dashboard(host="0.0.0.0", port=5000)
             except OSError:
-                print("Dashboard already running at http://localhost:5000")
+                print("Dashboard already running (port 5000)")
 
         trader_class = FiveMinPaperTrader if market_type == "5min" else PaperTrader
         trader = trader_class(
@@ -615,9 +673,9 @@ def main():
         if args.dashboard:
             try:
                 from shared.dashboard import start_in_thread as start_dashboard
-                start_dashboard(host="127.0.0.1", port=5000)
+                start_dashboard(host="0.0.0.0", port=5000)
             except OSError:
-                print("Dashboard already running at http://localhost:5000")
+                print("Dashboard already running (port 5000)")
 
         portfolio = Portfolio(starting_cash=real_balance)
 
@@ -636,6 +694,54 @@ def main():
             metrics_module.print_results(results, strategy.name + " [Live]")
         else:
             print("Live trading session produced no results.")
+
+        print("Done.")
+        return
+
+    # ----------------------------------------------------------------
+    # COPY TRADING MODE
+    # ----------------------------------------------------------------
+    if args.mode == "copy":
+        instance_name = (
+            _sanitize_name(args.name)
+            if args.name
+            else f"copy_{args.copy_address[2:10].lower()}_{time.strftime('%H%M%S')}"
+        )
+
+        if args.dashboard:
+            try:
+                from shared.dashboard import start_in_thread as start_dashboard
+                start_dashboard(host="0.0.0.0", port=5000)
+            except OSError:
+                print("Dashboard already running (port 5000)")
+
+        wallet = None
+        if args.copy_trading_mode == "live":
+            from wallet import wallet_from_env
+            print("\nLoading wallet credentials from .env...")
+            try:
+                wallet = wallet_from_env()
+            except (ValueError, KeyError) as e:
+                print(f"ERROR: Could not load wallet: {e}")
+                print("Copy .env.example to .env and fill in your credentials.")
+                sys.exit(1)
+
+        trader = CopyTrader(
+            copy_address     = args.copy_address,
+            copy_size_usdc   = args.copy_size,
+            sizing_mode      = args.copy_sizing,
+            cash             = args.cash,
+            duration_minutes = args.duration,
+            instance_name    = instance_name,
+            wallet           = wallet,
+        )
+        results = trader.run()
+
+        mode_label = "Live" if args.copy_trading_mode == "live" else "Paper"
+        if results:
+            metrics_module.print_results(results, f"CopyTrader [{mode_label}]")
+        else:
+            print("Copy trading session produced no results.")
 
         print("Done.")
         return

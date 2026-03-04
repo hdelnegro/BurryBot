@@ -12,6 +12,7 @@ Usage (via main.py):
 """
 
 import json
+import math
 import os
 import sys
 import time
@@ -47,6 +48,21 @@ def _handle_sigint(signum, frame):
     global _stop_requested
     print("\n\n[Paper Trader] Ctrl+C received — stopping after current tick...")
     _stop_requested = True
+
+
+# ---------------------------------------------------------------------------
+# JSON helpers
+# ---------------------------------------------------------------------------
+
+def _sanitize_json(obj):
+    """Recursively replace NaN/Inf floats with None so json.dump produces valid JSON."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_json(v) for v in obj]
+    return obj
 
 
 # ---------------------------------------------------------------------------
@@ -644,14 +660,19 @@ class PaperTrader:
             "recent_trades":  list(reversed(trades_list)),
             "market_signals": list(self.latest_signals.values()),
         }
+        state.update(self._extra_state_fields())
 
         os.makedirs(DATA_DIR, exist_ok=True)
         state_filename = f"state_{self.instance_name}.json"
         tmp_path   = os.path.join(DATA_DIR, state_filename + ".tmp")
         state_path = os.path.join(DATA_DIR, state_filename)
         with open(tmp_path, "w") as f:
-            json.dump(state, f, indent=2)
+            json.dump(_sanitize_json(state), f, indent=2)
         os.replace(tmp_path, state_path)
+
+    def _extra_state_fields(self) -> dict:
+        """Subclasses can override to inject extra fields into the state JSON."""
+        return {}
 
     def _close_all_positions(self, final_prices: Dict[str, float]) -> None:
         open_tokens = list(self.portfolio.positions.keys())

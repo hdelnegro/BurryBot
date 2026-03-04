@@ -250,8 +250,8 @@ Makes random BUY/SELL/HOLD decisions. Its only purpose is to serve as a performa
 
 How much capital to deploy in any single trade. BurryBot's risk manager enforces two hard limits:
 
-- **Max position size**: a single position cannot exceed 20% of total portfolio value
-- **Max total exposure**: no more than 80% of the portfolio can be in open positions at once — at least 20% stays in cash
+- **Max position size**: a single position cannot exceed 5% of total portfolio value (`MAX_POSITION_SIZE_FRACTION = 0.05`)
+- **Max total exposure**: no more than 80% of the portfolio can be in open positions at once — at least 20% stays in cash (`MAX_TOTAL_EXPOSURE_FRACTION = 0.80`)
 
 Within those limits, trade size is further scaled by the strategy's `confidence` value (0.0–1.0). Higher confidence → larger position.
 
@@ -264,3 +264,70 @@ The fraction of total portfolio capital currently at risk in open positions. Hig
 A common mistake in backtesting where a strategy accidentally uses future data to make past decisions. For example, if a strategy can "see" tomorrow's price when deciding what to buy today, it will appear to perform perfectly in backtests — but that performance is meaningless because you cannot know tomorrow's prices today.
 
 BurryBot prevents this by passing only `history[:i]` (all bars *before* the current one) to the strategy at each step.
+
+---
+
+## Additional Strategy Concepts
+
+### Overreaction Fade
+
+Markets sometimes overreact to new information. A piece of news drops and a token's price spikes dramatically — often more than the information actually warrants. As participants reconsider, prices partially revert. The overreaction fade strategy exploits this by detecting abnormally large single-bar price moves and betting against them.
+
+The key parameters:
+- **Window**: the rolling window used to compute typical bar-to-bar volatility
+- **Threshold**: a spike must be at least N× the typical move to trigger (default: 2.5×)
+- **Min volatility floor**: ignores dead markets where even large moves are trivially small
+
+**Risk:** Not every spike is a temporary overreaction. Sometimes the news really is that significant and the new price level is correct. The strategy can suffer on directional, fundamental moves — for example, a market that resolves YES and spikes from 0.40 to 0.95 in one bar is correctly priced at 0.95, not overreacting.
+
+### BTC 5-Minute Momentum
+
+A specialised strategy for Polymarket's 5-minute BTC up/down markets (`btc-updown-5m-{timestamp}`). Each market is a fresh binary: will BTC be higher or lower 5 minutes from now? A new market opens every 5 minutes.
+
+Because each individual market is only 5 minutes long, there is no meaningful price history within a single market to run traditional strategies on. Instead, this strategy builds **cross-market synthetic history** — treating each resolved market's closing direction (up/down) as a data point, then looking for streaks and patterns across successive markets.
+
+The approach:
+1. Collect the outcomes of the last N resolved markets (default: 5)
+2. Weight recent markets more heavily using exponential decay (older outcomes matter less)
+3. Add an intra-market slope signal: if the current market's price is trending strongly in one direction in real time, that is additional evidence
+4. If the combined signal exceeds a minimum edge threshold (default: 7%), place a bet in that direction
+
+**Aggressive vs Conservative variants:** The same signal logic, different fixed bet sizes ($150 vs $25 per trade). Because each market lasts only 5 minutes, position sizing via portfolio fraction is less useful — you need to size based on how much you want to risk per discrete bet.
+
+**Risk:** Very short time horizons mean high noise. BTC price moves over 5 minutes are close to random. The strategy is betting on slight serial correlations in BTC momentum — correlations that may be small, intermittent, and sensitive to market conditions.
+
+---
+
+## Copy Trading
+
+### What it is
+
+Copy trading means automatically mirroring the trades of another trader in real time. When the target wallet places a buy or sell order, BurryBot detects it and places an equivalent order on your behalf — without you needing to watch the market or make any decisions.
+
+BurryBot implements this by polling Polymarket's public activity API every 30 seconds and comparing new transactions against a set of already-seen transaction hashes. Any new trade is immediately mirrored.
+
+### The theory
+
+The hypothesis is simple: find a trader who is consistently right and piggyback on their edge. If the target has genuine skill — superior information, better models, or faster reaction to news — copying them transfers that edge to your portfolio.
+
+Polymarket's activity feed is public, so there is no information barrier to seeing what any wallet has traded. The practical barrier is identification: finding wallets that are actually skilled rather than lucky, and maintaining that list as performance changes over time.
+
+### Why it's harder than it looks
+
+**Past performance does not guarantee future performance.** A wallet that returned 40% last month may have been in the right place at the right time. Distinguishing luck from skill requires a large sample of trades across diverse market conditions — which is difficult to obtain before conditions change.
+
+**Lag disadvantage.** You are always at least one poll interval (30 seconds) behind the target. If they buy at 0.50 and the market immediately moves to 0.65 on the same information, you may be buying at 0.65 — getting none of the edge.
+
+**Position sizing mismatch.** You can see *what* the target bought but not *how much relative to their portfolio*. A $10,000 bet from a $200,000 wallet (5% position) is very different from the same bet from a $12,000 wallet (83% position). BurryBot offers two approaches:
+- **Fixed sizing**: spend a constant dollar amount on every copied trade, regardless of the target's sizing
+- **Risk manager sizing**: size each trade as a fraction of your own portfolio (5% max), the same logic used by all other strategies
+
+**Correlated failure.** If your performance is perfectly correlated with the target's, you have no diversification. When their strategy stops working — and it will eventually — your portfolio suffers at exactly the same time.
+
+### When it makes sense
+
+Copy trading is most defensible when:
+- The target has a long, auditable track record across many different market types
+- You are using risk-manager sizing to cap your exposure per position
+- You treat it as one component of a diversified approach, not a complete strategy
+- You actively monitor performance and are ready to stop if the edge disappears

@@ -66,6 +66,14 @@ def _no_cache(resp):
     return resp
 
 
+def _safe_mtime(p: str) -> float:
+    """Return mtime of p, or 0.0 if the file no longer exists (TOCTOU-safe)."""
+    try:
+        return os.path.getmtime(p)
+    except OSError:
+        return 0.0
+
+
 def _get_all_state_files():
     """
     Glob all *_agent/data/state_*.json across the BurryBot repo root.
@@ -73,7 +81,7 @@ def _get_all_state_files():
     """
     pattern = os.path.join(_BURRYBOT_ROOT, "*_agent", "data", "state_*.json")
     paths   = glob.glob(pattern)
-    paths.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+    paths.sort(key=_safe_mtime, reverse=True)
     results = []
     for path in paths:
         basename = os.path.basename(path)                      # state_foo.json
@@ -92,7 +100,7 @@ def _find_state_path(name: str):
     if not matches:
         return None
     # If multiple matches (shouldn't happen), prefer most recently modified
-    matches.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+    matches.sort(key=_safe_mtime, reverse=True)
     return matches[0]
 
 
@@ -124,7 +132,10 @@ def _load_state(name: str):
                 upd_str += "Z"
             upd_at  = datetime.fromisoformat(upd_str.replace("Z", "+00:00"))
             age     = (datetime.now(timezone.utc) - upd_at).total_seconds()
-            is_live = age < STALE_SECONDS
+            # "starting" sessions can take a long time to fetch initial data;
+            # give them 2 hours before marking stale so they stay in ACTIVE.
+            threshold = 7200 if data.get("status") == "starting" else STALE_SECONDS
+            is_live = age < threshold
         except Exception:
             pass
 
@@ -1058,37 +1069,35 @@ function updateInstanceCard(inst) {
 }
 
 async function pollInstances() {
-  let instances;
   try {
     const res = await fetch('/api/instances?t=' + Date.now(), { cache: 'no-store' });
-    if (!res.ok) { scheduleNext(); return; }
-    instances = await res.json();
-  } catch { scheduleNext(); return; }
+    if (!res.ok) return;
+    const instances = await res.json();
+    if (!Array.isArray(instances)) return;
 
-  const emptyEl      = document.getElementById('empty-state');
-  const activeSec    = document.getElementById('active-section');
-  const expiredSec   = document.getElementById('expired-section');
-  const activeGrid   = document.getElementById('active-grid');
-  const liveCountEl  = document.getElementById('live-count');
-  const totalCountEl = document.getElementById('total-count');
-  const lastRefEl    = document.getElementById('last-refresh');
+    const emptyEl      = document.getElementById('empty-state');
+    const activeSec    = document.getElementById('active-section');
+    const expiredSec   = document.getElementById('expired-section');
+    const activeGrid   = document.getElementById('active-grid');
+    const liveCountEl  = document.getElementById('live-count');
+    const totalCountEl = document.getElementById('total-count');
+    const lastRefEl    = document.getElementById('last-refresh');
 
-  const liveInsts = instances.filter(i => i.is_live);
-  const deadInsts = instances.filter(i => !i.is_live);
+    const liveInsts = instances.filter(i => i.is_live);
+    const deadInsts = instances.filter(i => !i.is_live);
 
-  // Sort active sessions per combo box selection
-  const sortBy = (document.getElementById('sort-select') || {}).value || 'return';
-  if (sortBy === 'portfolio') {
-    liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_value)||0) - (parseFloat(a.portfolio.total_value)||0));
-  } else if (sortBy === 'created') {
-    liveInsts.sort((a, b) => (a.session_start||'').localeCompare(b.session_start||''));
-  } else if (sortBy === 'name') {
-    liveInsts.sort((a, b) => (a.name||'').localeCompare(b.name||''));
-  } else {
-    liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_return_pct)||0) - (parseFloat(a.portfolio.total_return_pct)||0));
-  }
+    // Sort active sessions per combo box selection
+    const sortBy = (document.getElementById('sort-select') || {}).value || 'return';
+    if (sortBy === 'portfolio') {
+      liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_value)||0) - (parseFloat(a.portfolio.total_value)||0));
+    } else if (sortBy === 'created') {
+      liveInsts.sort((a, b) => (a.session_start||'').localeCompare(b.session_start||''));
+    } else if (sortBy === 'name') {
+      liveInsts.sort((a, b) => (a.name||'').localeCompare(b.name||''));
+    } else {
+      liveInsts.sort((a, b) => (parseFloat(b.portfolio.total_return_pct)||0) - (parseFloat(a.portfolio.total_return_pct)||0));
+    }
 
-  try {
     // Create or update all cards
     for (const inst of instances) {
       const gridId = inst.is_live ? 'active-grid' : 'expired-grid';
@@ -1116,9 +1125,13 @@ async function pollInstances() {
     if (liveCountEl)  liveCountEl.textContent  = liveInsts.length;
     if (totalCountEl) totalCountEl.textContent = instances.length;
     if (lastRefEl)    lastRefEl.textContent     = 'updated ' + new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+
+    // Clear any previous error banner on success
+    const prevErr = document.getElementById('poll-error-banner');
+    if (prevErr) prevErr.remove();
+
   } catch (e) {
-    console.error('pollInstances card error:', e);
-    // Show inline banner so the error is visible without opening devtools
+    console.error('pollInstances error:', e);
     let errEl = document.getElementById('poll-error-banner');
     if (!errEl) {
       errEl = document.createElement('div');
@@ -1128,9 +1141,9 @@ async function pollInstances() {
       document.body.appendChild(errEl);
     }
     errEl.textContent = 'Dashboard error: ' + e.message + ' — check browser console';
+  } finally {
+    scheduleNext();
   }
-
-  scheduleNext();
 }
 
 function scheduleNext() {

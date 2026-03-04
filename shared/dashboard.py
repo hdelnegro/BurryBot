@@ -73,7 +73,7 @@ def _get_all_state_files():
     """
     pattern = os.path.join(_BURRYBOT_ROOT, "*_agent", "data", "state_*.json")
     paths   = glob.glob(pattern)
-    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    paths.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
     results = []
     for path in paths:
         basename = os.path.basename(path)                      # state_foo.json
@@ -92,7 +92,7 @@ def _find_state_path(name: str):
     if not matches:
         return None
     # If multiple matches (shouldn't happen), prefer most recently modified
-    matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    matches.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
     return matches[0]
 
 
@@ -1490,7 +1490,7 @@ def api_finish(name: str):
 # Public helper: start Flask in a daemon thread (called from agent main.py)
 # ---------------------------------------------------------------------------
 
-def start_in_thread(host: str = "127.0.0.1", port: int = 5000) -> None:
+def start_in_thread(host: str = "0.0.0.0", port: int = 5000) -> None:
     """
     Launch the Flask dev server in a background daemon thread.
 
@@ -1519,6 +1519,6 @@ if __name__ == "__main__":
     # Allow running standalone: python shared/dashboard.py
     print("Starting dashboard server (standalone mode)...")
     print("Discovering state files from all *_agent/data/ directories...")
-    print("\n  → http://127.0.0.1:5000\n")
+    print("\n  → http://0.0.0.0:5000\n")
     _redirect_werkzeug_to_file()
-    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
